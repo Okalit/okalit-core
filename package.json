@@ -1,0 +1,15 @@
+{
+  "name": "okalit-core",
+  "version": "0.0.1",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "babel src --out-dir dist",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@babel/cli": "^7.x",
+    "@babel/core": "^7.x",
+    "@babel/plugin-proposal-decorators": "^7.x",
+    "@babel/preset-env": "^7.x"
+  }
+}
