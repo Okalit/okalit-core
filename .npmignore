@@ -1,0 +1,4 @@
+# .npmignore
+src/
+babel.config.json
+node_modules/
