@@ -1,6 +1,6 @@
 {
   "name": "@okalit/core",
-  "version": "0.0.2",
+  "version": "0.0.4",
   "type": "module",
   "main": "dist/index.js",
   "keywords": [
@@ -11,7 +11,9 @@
     "lit"
   ],
   "exports": {
-    ".": "./dist/index.js"
+    ".": "./dist/index.js",
+    "./performance": "./dist/performance.js",
+    "./performance.js": "./dist/performance.js"
   },
   "files": [
     "dist"
