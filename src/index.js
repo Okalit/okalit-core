@@ -1,6 +1,7 @@
-export { Okalit, html, signal, computed, effect, batch } from './Okalit.js';
+export { Okalit, signal, computed, effect, batch } from './Okalit.js';
+export { html } from 'lit'; 
 export { defineElement } from './define-element.js';
-export { defineChannel, getChannel } from './channel.js';
+export { defineChannel, getChannel, getChannelValueStorage } from './channel.js';
 export { Router, navigate } from './router.js';
 export { AppMixin, ModuleMixin, PageMixin } from './mixins.js';
 export { t, getI18n } from './i18n.js';

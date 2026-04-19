@@ -1,4 +1,4 @@
-import { html} from 'uhtml';
+import { html} from 'lit';
 import { Router, navigate } from './router.js';
 import { createI18n } from './i18n.js';
 import './router-outlet.js';

@@ -13,8 +13,13 @@ export function defineElement({ tag, styles = [], props = [], params = [] }) {
     }
     cls._propMap = propMap;
 
-    // Tell the browser which attributes to observe (kebab-case)
-    cls.observedAttributes = Object.keys(propMap).map(toKebabCase);
+    Object.defineProperty(cls, 'observedAttributes', {
+      get() {
+        return Object.keys(propMap).map(toKebabCase);
+      },
+      configurable: true,
+      enumerable: true
+    });
 
     // Register the custom element after the class is fully defined
     context.addInitializer(function () {

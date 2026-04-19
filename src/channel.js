@@ -51,6 +51,20 @@ export function getChannel(name) {
   return !registry.has(name) ? null : registry.get(name);
 }
 
+export function getChannelValueStorage(name, storageType = 'local') {
+  const storage = getStorage(storageType);
+  if (!storage) return null;
+
+  const raw = storage.getItem(`okalit:channel:${name}`);
+  if (raw === null) return null;
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+
 /**
  * Get or create a shared channel instance from the global registry.
  */
