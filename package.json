@@ -1,6 +1,6 @@
 {
   "name": "@okalit/core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "dist/index.js",
   "keywords": [
@@ -22,6 +22,10 @@
   "scripts": {
     "build": "babel src --out-dir dist",
     "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "lit": "^3.0.0",
+    "uhtml": "^5.0.9"
   },
   "devDependencies": {
     "@babel/cli": "^7.x",
