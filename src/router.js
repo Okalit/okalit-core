@@ -29,8 +29,6 @@ export class Router {
     return instance;
   }
 
-  // --- Public API ---
-
   navigate(path, { replace = false } = {}) {
     if (path === this.currentPath.value) return;
     if (replace) {
@@ -44,8 +42,6 @@ export class Router {
   back() {
     window.history.back();
   }
-
-
 
   registerOutlet(outlet) {
     this._outlets.add(outlet);
@@ -89,10 +85,6 @@ export class Router {
     const guardsPassed = await this._runGuards(match.guards, path, match);
     if (!guardsPassed) return;
 
-    // Run route-level interceptors
-    const interceptorsPassed = await this._runInterceptors(match.interceptors, path, match);
-    if (!interceptorsPassed) return;
-
     // Update reactive state
     this.currentPath.value = path;
     this.params.value = match.params;
@@ -133,25 +125,11 @@ export class Router {
     return true;
   }
 
-  async _runInterceptors(interceptors, path, match) {
-    if (!interceptors || !interceptors.length) return true;
-
-    for (const interceptor of interceptors) {
-      const result = await interceptor({ path, params: match.params, route: match });
-      if (result === false) return false;
-      if (typeof result === 'string') {
-        this.navigate(result, { replace: true });
-        return false;
-      }
-    }
-    return true;
-  }
-
   /**
    * Match a path against the route tree.
    * Returns a flat match object with the chain of matched routes.
    */
-  _matchRoute(routes, path, basePath = '', parentGuards = [], parentInterceptors = []) {
+  _matchRoute(routes, path, basePath = '', parentGuards = []) {
     for (const route of routes) {
       const fullPattern = normalizePath(basePath + '/' + route.path);
 
@@ -164,18 +142,16 @@ export class Router {
 
       if (match) {
         const guards = [...parentGuards, ...(route.guards || [])];
-        const interceptors = [...parentInterceptors, ...(route.interceptors || [])];
         const result = {
           route,
           params: match.params,
           guards,
-          interceptors,
           chain: [route],
         };
 
         // If route has children, try to match deeper
         if (route.children && route.children.length) {
-          const childMatch = this._matchRoute(route.children, path, fullPattern, guards, interceptors);
+          const childMatch = this._matchRoute(route.children, path, fullPattern, guards);
           if (childMatch) {
             childMatch.chain = [route, ...childMatch.chain];
             return childMatch;

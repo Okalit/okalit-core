@@ -92,6 +92,8 @@ export class OkalitService {
   #cache = new Map();
   #cacheEnabled = false;
   #cacheTTL = 0; // 0 = no expiry
+  #interceptors = [];
+  #responseInterceptors = [];
 
   /**
    * Configure the service instance.
@@ -101,12 +103,16 @@ export class OkalitService {
    * @param {Record<string, string>} [opts.headers]
    * @param {boolean} [opts.cache]    — enable/disable in-memory cache (default: false)
    * @param {number}  [opts.cacheTTL] — cache lifetime in ms (0 = forever until clearCache)
+   * @param {Object[]} [opts.interceptors] — route interceptors (see Router docs)
+   * @param {Object[]} [opts.responseInterceptors] — response interceptors (see Router docs)
    */
-  configure({ baseUrl, headers, cache, cacheTTL } = {}) {
+  configure({ baseUrl, headers, cache, cacheTTL, interceptors, responseInterceptors } = {}) {
     if (baseUrl !== undefined) this.#baseUrl = baseUrl.replace(/\/+$/, '');
     if (headers !== undefined) this.#headers = { ...this.#headers, ...headers };
     if (cache !== undefined) this.#cacheEnabled = cache;
     if (cacheTTL !== undefined) this.#cacheTTL = cacheTTL;
+    if (interceptors !== undefined) this.#interceptors = Array.isArray(interceptors) ? interceptors : [interceptors];
+    if (responseInterceptors !== undefined) this.#responseInterceptors = Array.isArray(responseInterceptors) ? responseInterceptors : [responseInterceptors];
   }
 
   // ── HTTP helpers ───────────────────────────────────────────
@@ -123,7 +129,7 @@ export class OkalitService {
       const qs = new URLSearchParams(params).toString();
       if (qs) url += `?${qs}`;
     }
-    return this.#request(url, { method: 'GET' }, true);
+    return new RequestControl(this.#request(url, { method: 'GET' }, true));
   }
 
   /**
@@ -133,10 +139,10 @@ export class OkalitService {
    * @returns {RequestControl}
    */
   post(path, body) {
-    return this.#request(`${this.#baseUrl}${path}`, {
+    return new RequestControl(this.#request(`${this.#baseUrl}${path}`, {
       method: 'POST',
       body: JSON.stringify(body),
-    });
+    }));
   }
 
   /**
@@ -146,10 +152,10 @@ export class OkalitService {
    * @returns {RequestControl}
    */
   put(path, body) {
-    return this.#request(`${this.#baseUrl}${path}`, {
+    return new RequestControl(this.#request(`${this.#baseUrl}${path}`, {
       method: 'PUT',
       body: JSON.stringify(body),
-    });
+    }));
   }
 
   /**
@@ -158,70 +164,83 @@ export class OkalitService {
    * @returns {RequestControl}
    */
   delete(path) {
-    return this.#request(`${this.#baseUrl}${path}`, {
+    return new RequestControl(this.#request(`${this.#baseUrl}${path}`, {
       method: 'DELETE',
-    });
+    }));
   }
 
   /** Clear the in-memory cache (all entries or a specific path). */
   clearCache(path) {
-    if (path) {
-      const url = `${this.#baseUrl}${path}`;
-      this.#cache.delete(url);
-    } else {
+    if (!path) {
       this.#cache.clear();
+      return;
+    }
+
+    const prefix = `${this.#baseUrl}${path}`;
+    for (const key of this.#cache.keys()) {
+      if (key.startsWith(prefix)) {
+        this.#cache.delete(key);
+      }
     }
   }
 
   // ── Internal ───────────────────────────────────────────────
 
-  #request(url, options, cacheable = false) {
-    // Check cache for GET requests
-    if (cacheable && this.#cacheEnabled) {
-      const cached = this.#cache.get(url);
-      if (cached) {
-        const expired = this.#cacheTTL > 0 && (Date.now() - cached.time > this.#cacheTTL);
-        if (!expired) {
-          return new RequestControl(Promise.resolve(structuredClone(cached.data)));
+  async #request(url, options, cacheable = false) {
+    let currentUrl = url;
+    let currentOptions = { ...options, headers: { ...this.#headers, ...options.headers } };
+
+    for (const interceptor of this.#interceptors) {
+      const result = await interceptor({ url: currentUrl, options: currentOptions });
+      
+      if (!result) {
+        throw { status: 0, statusText: 'Cancelled', body: { message: 'Request rejected' } };
+      }
+
+      currentUrl = result.url || currentUrl;
+      currentOptions = result.options || currentOptions;
+    }
+
+    let promise;
+    const cached = cacheable && this.#cacheEnabled ? this.#cache.get(currentUrl) : null;
+
+    if (cached && (this.#cacheTTL === 0 || Date.now() - cached.time < this.#cacheTTL)) {
+      promise = cached.status === 'pending' ? cached.promise : Promise.resolve(cached.data);
+    } else {
+      promise = fetch(currentUrl, currentOptions).then(async (res) => {
+        if (!res.ok) {
+          let body;
+          try { body = await res.json(); } catch { body = { message: res.statusText }; }
+          throw { status: res.status, statusText: res.statusText, body };
         }
-        this.#cache.delete(url);
+        const text = await res.text();
+        return text ? JSON.parse(text) : null;
+      });
+
+      if (cacheable && this.#cacheEnabled) {
+        this.#cache.set(currentUrl, { status: 'pending', promise, time: Date.now() });
+        promise.then(data => this.#cache.set(currentUrl, { status: 'resolved', data, time: Date.now() }))
+               .catch(() => this.#cache.delete(currentUrl));
       }
     }
 
-    const promise = fetch(url, {
-      ...options,
-      headers: { ...this.#headers },
-    }).then(async (res) => {
-      if (!res.ok) {
-        let errorBody;
-        try {
-          errorBody = await res.json();
-        } catch {
-          errorBody = { message: res.statusText };
-        }
-        throw { status: res.status, statusText: res.statusText, body: errorBody };
-      }
+    let data = null;
+    let error = null;
 
-      // Handle 204 No Content
-      const text = await res.text();
-      if (!text) return null;
+    try {
+      data = await promise;
+    } catch (e) {
+      error = e;
+    }
 
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        data = text;
-      }
+    for (const interceptor of this.#responseInterceptors) {
+      const result = await interceptor({ data, error });
+      data = result?.data !== undefined ? result.data : data;
+      error = result?.error !== undefined ? result.error : error;
+    }
 
-      // Store in cache
-      if (cacheable && this.#cacheEnabled) {
-        this.#cache.set(url, { data, time: Date.now() });
-      }
-
-      return data;
-    });
-
-    return new RequestControl(promise);
+    if (error) throw error;
+    return structuredClone(data);
   }
 }
 
@@ -233,19 +252,24 @@ export class OkalitGraphqlService {
   #cache = new Map();
   #cacheEnabled = false;
   #cacheTTL = 0;
-
+  #interceptors = [];
+  #responseInterceptors = [];
   /**
    * @param {Object} opts
    * @param {string}  [opts.endpoint] — GraphQL endpoint URL
    * @param {Record<string, string>} [opts.headers]
    * @param {boolean} [opts.cache]    — cache query results (default: false)
    * @param {number}  [opts.cacheTTL] — cache lifetime in ms
+   * @param {Object[]} [opts.interceptors] — route interceptors (see Router docs)
+   * @param {Object[]} [opts.responseInterceptors] — response interceptors
    */
-  configure({ endpoint, headers, cache, cacheTTL } = {}) {
+  configure({ endpoint, headers, cache, cacheTTL, interceptors, responseInterceptors } = {}) {
     if (endpoint !== undefined) this.#endpoint = endpoint.replace(/\/+$/, '');
     if (headers !== undefined) this.#headers = { ...this.#headers, ...headers };
     if (cache !== undefined) this.#cacheEnabled = cache;
     if (cacheTTL !== undefined) this.#cacheTTL = cacheTTL;
+    if (interceptors !== undefined) this.#interceptors = Array.isArray(interceptors) ? interceptors : [interceptors];
+    if (responseInterceptors !== undefined) this.#responseInterceptors = Array.isArray(responseInterceptors) ? responseInterceptors : [responseInterceptors];
   }
 
   /**
@@ -255,7 +279,7 @@ export class OkalitGraphqlService {
    * @returns {RequestControl}
    */
   query(queryString, variables = {}) {
-    return this.#execute(queryString, variables);
+    return new RequestControl(this.#execute(queryString, variables));
   }
 
   /**
@@ -265,64 +289,94 @@ export class OkalitGraphqlService {
    * @returns {RequestControl}
    */
   mutate(mutationString, variables = {}) {
-    return this.#execute(mutationString, variables);
+    return new RequestControl(this.#execute(mutationString, variables));
   }
 
   /** Clear cached queries. Pass a query string to clear a specific one. */
   clearCache(queryString) {
-    if (queryString) {
-      this.#cache.delete(queryString);
-    } else {
+    if (!queryString) {
       this.#cache.clear();
+      return;
+    }
+
+    for (const key of this.#cache.keys()) {
+      if (key.includes(queryString)) {
+        this.#cache.delete(key);
+      }
     }
   }
 
-  #execute(queryString, variables) {
-    // Cache check (keyed by query + variables)
-    const cacheKey = queryString + JSON.stringify(variables);
-    if (this.#cacheEnabled) {
-      const cached = this.#cache.get(cacheKey);
-      if (cached) {
-        const expired = this.#cacheTTL > 0 && (Date.now() - cached.time > this.#cacheTTL);
-        if (!expired) {
-          return new RequestControl(Promise.resolve(structuredClone(cached.data)));
-        }
-        this.#cache.delete(cacheKey);
-      }
-    }
-
-    const promise = fetch(this.#endpoint, {
+  async #execute(queryString, variables) {
+    let currentUrl = this.#endpoint;
+    let currentOptions = {
       method: 'POST',
       headers: { ...this.#headers },
       body: JSON.stringify({ query: queryString, variables }),
-    }).then(async (res) => {
-      // Handle HTTP-level errors (network, 500, etc.)
-      if (!res.ok) {
-        let errorBody;
-        try {
-          errorBody = await res.json();
-        } catch {
-          errorBody = { message: res.statusText };
+    };
+
+    for (const interceptor of this.#interceptors) {
+      const result = await interceptor({ url: currentUrl, options: currentOptions });
+      
+      if (!result) {
+        throw { status: 0, statusText: 'Cancelled', body: { message: 'Request rejected' } };
+      }
+
+      currentUrl = result.url || currentUrl;
+      currentOptions = result.options || currentOptions;
+    }
+
+    const cacheKey = queryString + JSON.stringify(variables);
+    const fullCacheKey = currentUrl + cacheKey; 
+    let promise;
+
+    const cached = this.#cacheEnabled ? this.#cache.get(fullCacheKey) : null;
+
+    if (cached && (this.#cacheTTL === 0 || Date.now() - cached.time < this.#cacheTTL)) {
+      promise = cached.status === 'pending' ? cached.promise : Promise.resolve(cached.data);
+    } else {
+      promise = fetch(currentUrl, currentOptions).then(async (res) => {
+        if (!res.ok) {
+          let errorBody;
+          try { errorBody = await res.json(); } catch { errorBody = { message: res.statusText }; }
+          throw { status: res.status, statusText: res.statusText, body: errorBody };
         }
-        throw { status: res.status, statusText: res.statusText, body: errorBody };
-      }
 
-      const json = await res.json();
-
-      // GraphQL can return 200 OK with errors in body
-      if (json.errors) {
-        throw { graphql: true, errors: json.errors, data: json.data ?? null };
-      }
-
-      const data = json.data;
+        const json = await res.json();
+        if (json.errors) {
+          throw { graphql: true, errors: json.errors, data: json.data ?? null };
+        }
+        return json.data;
+      });
 
       if (this.#cacheEnabled) {
-        this.#cache.set(cacheKey, { data, time: Date.now() });
+        this.#cache.set(fullCacheKey, { status: 'pending', promise, time: Date.now() });
+
+        promise
+          .then((data) => {
+            this.#cache.set(fullCacheKey, { status: 'resolved', data, time: Date.now() });
+          })
+          .catch(() => {
+            this.#cache.delete(fullCacheKey);
+          });
       }
+    }
 
-      return data;
-    });
+    let data = null;
+    let error = null;
 
-    return new RequestControl(promise);
+    try {
+      data = await promise;
+    } catch (e) {
+      error = e;
+    }
+
+    for (const interceptor of this.#responseInterceptors) {
+      const result = await interceptor({ data, error });
+      data = result?.data !== undefined ? result.data : data;
+      error = result?.error !== undefined ? result.error : error;
+    }
+
+    if (error) throw error;
+    return structuredClone(data);
   }
 }
