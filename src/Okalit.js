@@ -128,6 +128,19 @@ export class Okalit extends LitElement {
   onAfterRender(changedProperties) { }
   onDestroy() { }
 
+  attributeChangedCallback(name, oldVal, newVal) {
+    const propMap = this.constructor._propMap;
+    if (!propMap) return;
+
+    const propName = Object.keys(propMap).find(
+      key => key.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase() === name
+    );
+
+    if (propName && this._signals && this._signals[propName]) {
+      this._signals[propName].value = coerceValue(newVal, propMap[propName].type);
+    }
+  }
+
   // --- Utilities ---
   _syncAttributes() {
     const propMap = this.constructor._propMap;
