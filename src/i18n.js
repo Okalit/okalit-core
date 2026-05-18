@@ -29,6 +29,7 @@ class I18n {
     this._translations = {};
     this._defaultLocale = config.default || 'en';
     this._locales = config.locales || [this._defaultLocale];
+    this._basePath = config.basePath || '/i18n';
     this._ready = false;
 
     this.locale.value = this._detectLocale();
@@ -72,7 +73,10 @@ class I18n {
     }
 
     try {
-      const res = await fetch(`/i18n/${locale}.json`);
+      const res = await fetch(`${this._basePath}/${locale}.json`);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
       this._translations[locale] = await res.json();
       this._ready = true;
     } catch (e) {

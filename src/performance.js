@@ -105,6 +105,7 @@ export class OWhen extends HTMLElement {
   #loader = null;
   #condition = false;
   #triggered = false;
+  #connected = false;
 
   get loader() { return this.#loader; }
   set loader(fn) {
@@ -119,7 +120,7 @@ export class OWhen extends HTMLElement {
   }
 
   #tryLoad() {
-    if (this.#triggered || this._done || this._loading) return;
+    if (this.#triggered || this._done || this._loading || !this.#connected) return;
     if (this.#condition && this.#loader) {
       this.#triggered = true;
       executeLoader(this);
@@ -130,6 +131,15 @@ export class OWhen extends HTMLElement {
     super();
     this.attachShadow({ mode: 'open' });
     applySharedSetup(this.shadowRoot);
+  }
+
+  connectedCallback() {
+    this.#connected = true;
+    this.#tryLoad();
+  }
+
+  disconnectedCallback() {
+    this.#connected = false;
   }
 }
 

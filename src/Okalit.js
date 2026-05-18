@@ -12,9 +12,11 @@ export class Okalit extends LitElement {
     super();
     this._dispose = [];
     this._signals = {};
+    this._reactiveEffect = null;
 
     this._initProps();
-    this._dispose.push(...initChannels(this));
+    this._initChannelDisposers = initChannels(this);
+    this._dispose.push(...this._initChannelDisposers);
   }
 
   createRenderRoot() {
@@ -24,6 +26,7 @@ export class Okalit extends LitElement {
       sheet.replaceSync(this.constructor.styles.join('\n'));
       root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
     }
+
     return root;
   }
 
@@ -77,29 +80,49 @@ export class Okalit extends LitElement {
     super.connectedCallback();
     this._syncAttributes();
 
+    // Re-initialize channels if reconnecting after a disconnect
+    if (this._initChannelDisposers.length === 0 && this.constructor.channels) {
+      this._initChannelDisposers = initChannels(this);
+      this._dispose.push(...this._initChannelDisposers);
+    }
+
     this.onInit();
     this._watchProps();
+  }
 
-    let isFirstRun = true;
+  update(changedProperties) {
+    // Dispose previous signal tracking to prevent leaks
+    if (this._reactiveEffect) {
+      this._reactiveEffect();
+      this._reactiveEffect = null;
+    }
+
+    // Wrap LitElement's update (which calls render()) inside an effect
+    // so signal reads are tracked automatically — render only runs once.
+    let firstRun = true;
     this._reactiveEffect = effect(() => {
-      try {
-        this.render(); 
-      } catch(e) { }
-
-      if (!isFirstRun) {
+      if (firstRun) {
+        super.update(changedProperties);
+        firstRun = false;
+      } else {
         this.requestUpdate();
       }
-      isFirstRun = false;
     });
-
-    this._dispose.push(this._reactiveEffect);
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     this.onDestroy();
+
+    // Clean up reactive effect separately
+    if (this._reactiveEffect) {
+      this._reactiveEffect();
+      this._reactiveEffect = null;
+    }
+
     for (const dispose of this._dispose) dispose();
     this._dispose = [];
+    this._initChannelDisposers = [];
   }
 
   // Hook added for the initial DOM render
@@ -110,13 +133,11 @@ export class Okalit extends LitElement {
 
   willUpdate(changedProperties) {
     super.willUpdate(changedProperties);
-    // Pass changedProperties to allow conditional checks
     this.onBeforeRender(changedProperties);
   }
 
   updated(changedProperties) {
     super.updated(changedProperties);
-    // Pass changedProperties to allow conditional checks
     this.onAfterRender(changedProperties);
   }
 

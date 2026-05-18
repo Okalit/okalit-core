@@ -3,6 +3,20 @@ import { signal, effect, untracked } from 'uhtml';
 // Global registry: one channel instance per name, shared across all components
 const registry = new Map();
 
+// Debug mode flag — toggled by AppMixin when modeDebug: true
+let _debugMode = false;
+
+export function setDebugMode(enabled) {
+  _debugMode = enabled;
+  if (enabled) {
+    console.log(
+      '%c[Okalit Debug]%c Channel debug mode enabled',
+      'color: #fff; background: #6C5CE7; padding: 2px 6px; border-radius: 3px;',
+      'color: #6C5CE7;'
+    );
+  }
+}
+
 /**
  * Define a reactive channel.
  *
@@ -37,7 +51,7 @@ export function clearChannelsByScope(scope) {
     if (channel._scope !== scope) continue;
 
     // Reset signal to initial value
-    channel.signal.value = channel._initialValue;
+    channel.signal.value = structuredClone(channel._initialValue);
 
     // Remove persisted data
     const storage = getStorage(channel._persist);
@@ -89,7 +103,7 @@ function getOrCreateChannel(name, options) {
     return channel;
   }
 
-  const initial = loadFromStorage(name, options) ?? options.initialValue;
+  const initial = loadFromStorage(name, options) ?? structuredClone(options.initialValue);
   const sig = signal(initial);
 
   const channel = {
@@ -102,6 +116,11 @@ function getOrCreateChannel(name, options) {
     set(value) {
       sig.value = value;
       saveToStorage(name, value, options);
+    },
+    reset() {
+      sig.value = structuredClone(options.initialValue);
+      const storage = getStorage(options.persist);
+      if (storage) storage.removeItem(`okalit:channel:${name}`);
     },
     get value() {
       return sig.value;
@@ -152,13 +171,21 @@ export function initChannels(instance) {
 
   const disposers = [];
   const deferredEffects = [];
+  const senderTag = instance.tagName.toLowerCase();
 
   // Phase 1: create all handles first so they're all available on `this`
   for (const [key, config] of Object.entries(channelDefs)) {
     const channel = getOrCreateChannel(config._channelName, config._channelOptions);
+    const channelName = config._channelName;
 
     const handle = {
-      set: (value) => channel.set(value),
+      set: (value) => {
+        if (_debugMode) {
+          _logChannelSet(channelName, senderTag, value, channel);
+        }
+        channel.set(value);
+      },
+      reset: () => channel.reset?.(),
       get value() {
         return channel.value;
       },
@@ -167,20 +194,30 @@ export function initChannels(instance) {
     instance[key] = handle;
 
     if (config._methodName) {
-      deferredEffects.push({ channel, methodName: config._methodName });
+      deferredEffects.push({ channel, methodName: config._methodName, channelName });
     }
   }
 
   // Phase 2: subscribe effects after all handles exist
-  for (const { channel, methodName } of deferredEffects) {
+  for (const { channel, methodName, channelName } of deferredEffects) {
     const callback = (value) => {
       if (typeof instance[methodName] === 'function') {
+        if (_debugMode) {
+          _logChannelReceive(channelName, senderTag, methodName, value);
+        }
         instance[methodName](value);
       }
     };
 
+    // Track subscriber metadata for debug logging
+    if (!channel._subscriberMeta) channel._subscriberMeta = new Map();
+    channel._subscriberMeta.set(callback, senderTag);
+
     channel.subscribers.add(callback);
-    disposers.push(() => channel.subscribers.delete(callback));
+    disposers.push(() => {
+      channel.subscribers.delete(callback);
+      channel._subscriberMeta?.delete(callback);
+    });
 
     if (!channel.ephemeral) {
       const dispose = effect(() => {
@@ -192,4 +229,38 @@ export function initChannels(instance) {
   }
 
   return disposers;
+}
+
+// --- Debug logging helpers ---
+
+function _logChannelSet(channelName, senderTag, value, channel) {
+  const time = new Date();
+  const receivers = channel._subscriberMeta
+    ? [...channel._subscriberMeta.values()].map(t => `<${t}>`)
+    : [];
+
+  console.groupCollapsed(
+    `%c[Channel SET]%c ${channelName} %c← <${senderTag}>`,
+    'color: #fff; background: #6C5CE7; padding: 2px 6px; border-radius: 3px;',
+    'color: #6C5CE7; font-weight: bold;',
+    'color: #888;'
+  );
+  console.log('%cTime:     %c%s', 'font-weight:bold', 'font-weight:normal', time);
+  console.log('%cSender:   %c<%s>', 'font-weight:bold', 'font-weight:normal', senderTag);
+  console.log('%cValue:    ', 'font-weight:bold', value);
+  console.log('%cReceivers:%c %s', 'font-weight:bold', 'font-weight:normal', receivers.join(', ') || '(none)');
+  console.groupEnd();
+}
+
+function _logChannelReceive(channelName, receiverTag, methodName, value) {
+  const time = new Date().toLocaleTimeString('en-US', { hour12: false, fractionalSecondDigits: 3 });
+
+  console.log(
+    `%c[Channel RCV]%c ${channelName} %c→ <${receiverTag}>.${methodName}()`,
+    'color: #fff; background: #00B894; padding: 2px 6px; border-radius: 3px;',
+    'color: #00B894; font-weight: bold;',
+    'color: #888;',
+    `| ${time} |`,
+    value
+  );
 }

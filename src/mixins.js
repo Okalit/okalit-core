@@ -1,6 +1,7 @@
 import { html} from 'lit';
 import { Router, navigate } from './router.js';
 import { createI18n } from './i18n.js';
+import { setDebugMode } from './channel.js';
 import './router-outlet.js';
 
 /**
@@ -28,6 +29,11 @@ export const AppMixin = (Base) => class extends Base {
 
   constructor() {
     super();
+
+    if (this.constructor.config.modeDebug) {
+      setDebugMode(true);
+    }
+
     this._router = new Router(this.constructor.config.routes);
 
     const i18nConfig = this.constructor.config.i18n;

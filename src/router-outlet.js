@@ -4,10 +4,11 @@ export class OkalitRouter extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: 'open' });
-    const style = document.createElement('style');
-    style.textContent = ':host { display: contents; }';
-    this.shadowRoot.appendChild(style);
+    this._style = document.createElement('style');
+    this._style.textContent = ':host { display: contents; }';
+    this.shadowRoot.appendChild(this._style);
     this._currentComponent = null;
+    this._currentElement = null;
     this._depth = 0;
     this._renderVersion = 0;
   }
@@ -55,8 +56,13 @@ export class OkalitRouter extends HTMLElement {
 
     this._currentComponent = route.component;
 
-    this.shadowRoot.innerHTML = '';
+    // Remove the previous element without destroying the style
+    if (this._currentElement) {
+      this._currentElement.remove();
+    }
+
     const el = document.createElement(route.component);
+    this._currentElement = el;
     this.shadowRoot.appendChild(el);
   }
 }

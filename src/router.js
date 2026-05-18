@@ -30,7 +30,8 @@ export class Router {
   }
 
   navigate(path, { replace = false } = {}) {
-    if (path === this.currentPath.value) return;
+    const [pathname] = path.split('?');
+    if (pathname === this.currentPath.value && path === window.location.pathname + window.location.search) return;
     if (replace) {
       window.history.replaceState(null, '', path);
     } else {
