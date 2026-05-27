@@ -49,6 +49,50 @@ export class RequestControl {
   }
 }
 
+// ── StreamControl ──────────────────────────────────────────────
+// Wraps a Promise<stream> and exposes a declarative listen() API
+// for server-streaming gRPC calls.
+
+export class StreamControl {
+  #streamPromise;
+  #cancelled = false;
+  #stream = null;
+
+  constructor(streamPromise) {
+    this.#streamPromise = streamPromise;
+    streamPromise.then(s => { this.#stream = s; });
+  }
+
+  /**
+   * Declarative stream handler.
+   *
+   * @param {Object} callbacks
+   * @param {(data: any) => void}   [callbacks.onData]
+   * @param {(error: any) => void}  [callbacks.onError]
+   * @param {() => void}            [callbacks.onEnd]
+   * @param {(status: any) => void} [callbacks.onStatus]
+   */
+  listen({ onData, onError, onEnd, onStatus } = {}) {
+    this.#streamPromise
+      .then((stream) => {
+        if (this.#cancelled) return;
+        if (onData) stream.on('data', onData);
+        if (onError) stream.on('error', onError);
+        if (onEnd) stream.on('end', onEnd);
+        if (onStatus) stream.on('status', onStatus);
+      })
+      .catch((err) => {
+        onError?.(err);
+      });
+  }
+
+  /** Cancel the stream. */
+  cancel() {
+    this.#cancelled = true;
+    this.#stream?.cancel();
+  }
+}
+
 // ── Custom error classes ───────────────────────────────────────
 
 export class HttpError extends Error {
@@ -69,6 +113,37 @@ export class GraphqlError extends Error {
     this.data = data;
   }
 }
+
+export class GrpcError extends Error {
+  constructor(code, message, metadata) {
+    super(`gRPC ${code}: ${message}`);
+    this.name = 'GrpcError';
+    this.code = code;
+    this.grpcMessage = message;
+    this.metadata = metadata;
+  }
+}
+
+/** Standard gRPC status codes. */
+export const GrpcStatus = {
+  OK: 0,
+  CANCELLED: 1,
+  UNKNOWN: 2,
+  INVALID_ARGUMENT: 3,
+  DEADLINE_EXCEEDED: 4,
+  NOT_FOUND: 5,
+  ALREADY_EXISTS: 6,
+  PERMISSION_DENIED: 7,
+  RESOURCE_EXHAUSTED: 8,
+  FAILED_PRECONDITION: 9,
+  ABORTED: 10,
+  OUT_OF_RANGE: 11,
+  UNIMPLEMENTED: 12,
+  INTERNAL: 13,
+  UNAVAILABLE: 14,
+  DATA_LOSS: 15,
+  UNAUTHENTICATED: 16,
+};
 
 // ── Service registry ───────────────────────────────────────────
 
@@ -275,6 +350,402 @@ export class OkalitService extends BaseService {
     try { data = await promise; } catch (e) { error = e; }
 
     return this._runResponseInterceptors(data, error);
+  }
+}
+
+// ── OkalitSocketService (WebSocket) ────────────────────────────
+
+export class OkalitSocketService {
+  #url = '';
+  #socket = null;
+  #listeners = new Map();
+  #reconnect = true;
+  #reconnectInterval = 1000;
+  #reconnectMaxInterval = 30000;
+  #reconnectAttempts = 0;
+  #maxReconnectAttempts = Infinity;
+  #reconnectTimer = null;
+  #protocols = [];
+  #headers = {};
+  #interceptors = [];
+  #manualClose = false;
+  #pingInterval = 0;
+  #pingTimer = null;
+  #serializer = JSON.stringify;
+  #deserializer = JSON.parse;
+
+  /**
+   * @param {Object} opts
+   * @param {string}  opts.url — WebSocket server URL (ws:// or wss://)
+   * @param {string|string[]} [opts.protocols] — sub-protocols
+   * @param {boolean} [opts.reconnect] — auto-reconnect on disconnect (default: true)
+   * @param {number}  [opts.reconnectInterval] — initial delay in ms (default: 1000)
+   * @param {number}  [opts.reconnectMaxInterval] — max backoff delay (default: 30000)
+   * @param {number}  [opts.maxReconnectAttempts] — max retry attempts (default: Infinity)
+   * @param {number}  [opts.pingInterval] — keepalive ping interval in ms (0 = disabled)
+   * @param {Function} [opts.serializer] — message serializer (default: JSON.stringify)
+   * @param {Function} [opts.deserializer] — message deserializer (default: JSON.parse)
+   * @param {Object[]} [opts.interceptors] — outgoing message interceptors
+   */
+  configure({
+    url,
+    protocols,
+    reconnect,
+    reconnectInterval,
+    reconnectMaxInterval,
+    maxReconnectAttempts,
+    pingInterval,
+    serializer,
+    deserializer,
+    interceptors,
+  } = {}) {
+    if (url !== undefined) this.#url = url;
+    if (protocols !== undefined) this.#protocols = Array.isArray(protocols) ? protocols : [protocols];
+    if (reconnect !== undefined) this.#reconnect = reconnect;
+    if (reconnectInterval !== undefined) this.#reconnectInterval = reconnectInterval;
+    if (reconnectMaxInterval !== undefined) this.#reconnectMaxInterval = reconnectMaxInterval;
+    if (maxReconnectAttempts !== undefined) this.#maxReconnectAttempts = maxReconnectAttempts;
+    if (pingInterval !== undefined) this.#pingInterval = pingInterval;
+    if (serializer !== undefined) this.#serializer = serializer;
+    if (deserializer !== undefined) this.#deserializer = deserializer;
+    if (interceptors !== undefined) this.#interceptors = Array.isArray(interceptors) ? interceptors : [interceptors];
+  }
+
+  /** Current connection state. */
+  get state() {
+    if (!this.#socket) return 'CLOSED';
+    switch (this.#socket.readyState) {
+      case WebSocket.CONNECTING: return 'CONNECTING';
+      case WebSocket.OPEN: return 'OPEN';
+      case WebSocket.CLOSING: return 'CLOSING';
+      case WebSocket.CLOSED: return 'CLOSED';
+      default: return 'CLOSED';
+    }
+  }
+
+  /** Whether the socket is currently open and ready. */
+  get connected() {
+    return this.#socket?.readyState === WebSocket.OPEN;
+  }
+
+  /**
+   * Open the WebSocket connection.
+   * Resolves when connected, rejects on error.
+   */
+  connect(url) {
+    if (url) this.#url = url;
+    this.#manualClose = false;
+
+    return new Promise((resolve, reject) => {
+      if (this.connected) { resolve(); return; }
+
+      this.#socket = new WebSocket(this.#url, this.#protocols);
+
+      this.#socket.onopen = () => {
+        this.#reconnectAttempts = 0;
+        this.#startPing();
+        this.#emit('open');
+        resolve();
+      };
+
+      this.#socket.onclose = (event) => {
+        this.#stopPing();
+        this.#emit('close', event);
+        if (!this.#manualClose && this.#reconnect) {
+          this.#scheduleReconnect();
+        }
+      };
+
+      this.#socket.onerror = (event) => {
+        this.#emit('error', event);
+        if (this.#socket?.readyState === WebSocket.CONNECTING) {
+          reject(event);
+        }
+      };
+
+      this.#socket.onmessage = (event) => {
+        let data = event.data;
+        try { data = this.#deserializer(event.data); } catch { /* raw data */ }
+        this.#emit('message', data);
+      };
+    });
+  }
+
+  /**
+   * Close the WebSocket connection gracefully.
+   * @param {number} [code] — close status code
+   * @param {string} [reason] — close reason
+   */
+  disconnect(code = 1000, reason = '') {
+    this.#manualClose = true;
+    this.#stopPing();
+    clearTimeout(this.#reconnectTimer);
+    if (this.#socket) {
+      this.#socket.close(code, reason);
+      this.#socket = null;
+    }
+  }
+
+  /**
+   * Send a message through the socket.
+   * Runs outgoing interceptors before sending.
+   *
+   * @param {string} event — event/type name
+   * @param {*} payload — data payload
+   */
+  async send(event, payload) {
+    if (!this.connected) {
+      throw new Error('[OkalitSocketService] Cannot send — socket not connected.');
+    }
+
+    let message = { event, payload };
+
+    for (const interceptor of this.#interceptors) {
+      const result = await interceptor(message);
+      if (!result) return; // interceptor cancelled the message
+      message = result;
+    }
+
+    this.#socket.send(this.#serializer(message));
+  }
+
+  /**
+   * Send raw data without event wrapping.
+   * @param {*} data — data to send (will be serialized)
+   */
+  sendRaw(data) {
+    if (!this.connected) {
+      throw new Error('[OkalitSocketService] Cannot send — socket not connected.');
+    }
+    const serialized = typeof data === 'string' ? data : this.#serializer(data);
+    this.#socket.send(serialized);
+  }
+
+  /**
+   * Subscribe to a socket event.
+   *
+   * @param {string} event — 'open' | 'close' | 'error' | 'message' | custom event
+   * @param {Function} callback
+   * @returns {Function} unsubscribe function
+   */
+  on(event, callback) {
+    if (!this.#listeners.has(event)) {
+      this.#listeners.set(event, new Set());
+    }
+    this.#listeners.get(event).add(callback);
+    return () => this.off(event, callback);
+  }
+
+  /**
+   * Subscribe to a socket event once.
+   *
+   * @param {string} event
+   * @param {Function} callback
+   * @returns {Function} unsubscribe function
+   */
+  once(event, callback) {
+    const wrapper = (data) => {
+      this.off(event, wrapper);
+      callback(data);
+    };
+    return this.on(event, wrapper);
+  }
+
+  /**
+   * Unsubscribe from a socket event.
+   *
+   * @param {string} event
+   * @param {Function} callback
+   */
+  off(event, callback) {
+    this.#listeners.get(event)?.delete(callback);
+  }
+
+  /** Remove all listeners for an event, or all listeners entirely. */
+  removeAllListeners(event) {
+    if (event) {
+      this.#listeners.delete(event);
+    } else {
+      this.#listeners.clear();
+    }
+  }
+
+  // ── Internal ───────────────────────────────────────────────
+
+  #emit(event, data) {
+    const listeners = this.#listeners.get(event);
+    if (listeners) {
+      for (const cb of listeners) cb(data);
+    }
+  }
+
+  #scheduleReconnect() {
+    if (this.#reconnectAttempts >= this.#maxReconnectAttempts) {
+      this.#emit('reconnect_failed');
+      return;
+    }
+
+    const delay = Math.min(
+      this.#reconnectInterval * Math.pow(2, this.#reconnectAttempts),
+      this.#reconnectMaxInterval,
+    );
+
+    this.#reconnectAttempts++;
+    this.#emit('reconnecting', { attempt: this.#reconnectAttempts, delay });
+
+    this.#reconnectTimer = setTimeout(() => {
+      this.connect().catch(() => { /* reconnect will retry via onclose */ });
+    }, delay);
+  }
+
+  #startPing() {
+    if (this.#pingInterval <= 0) return;
+    this.#pingTimer = setInterval(() => {
+      if (this.connected) {
+        this.sendRaw(JSON.stringify({ type: 'ping' }));
+      }
+    }, this.#pingInterval);
+  }
+
+  #stopPing() {
+    clearInterval(this.#pingTimer);
+    this.#pingTimer = null;
+  }
+}
+
+// ── OkalitGrpcService (gRPC-Web) ───────────────────────────────
+
+export class OkalitGrpcService {
+  #host = '';
+  #metadata = {};
+  #interceptors = [];
+  #responseInterceptors = [];
+  #clients = new Map();
+
+  /**
+   * @param {Object} opts
+   * @param {string}  opts.host — gRPC server URL (through Envoy / grpc-web proxy)
+   * @param {Record<string, string>} [opts.metadata] — default metadata sent with every call
+   * @param {Function[]} [opts.interceptors] — metadata interceptors (outgoing)
+   * @param {Function[]} [opts.responseInterceptors] — response interceptors
+   */
+  configure({ host, metadata, interceptors, responseInterceptors } = {}) {
+    if (host !== undefined) this.#host = host.replace(/\/+$/, '');
+    if (metadata !== undefined) this.#metadata = { ...this.#metadata, ...metadata };
+    if (interceptors !== undefined) this.#interceptors = Array.isArray(interceptors) ? interceptors : [interceptors];
+    if (responseInterceptors !== undefined) this.#responseInterceptors = Array.isArray(responseInterceptors) ? responseInterceptors : [responseInterceptors];
+  }
+
+  /**
+   * Get or create a cached grpc-web client instance.
+   *
+   * @param {Function} ClientClass — generated grpc-web client constructor
+   * @returns client instance
+   */
+  client(ClientClass) {
+    if (!this.#clients.has(ClientClass)) {
+      this.#clients.set(ClientClass, new ClientClass(this.#host));
+    }
+    return this.#clients.get(ClientClass);
+  }
+
+  /**
+   * Unary RPC call — returns a RequestControl.
+   *
+   * @param {Function} ClientClass — generated grpc-web client
+   * @param {string} method — method name on the client
+   * @param {*} request — protobuf request message
+   * @param {Record<string, string>} [metadata] — per-call metadata
+   */
+  unary(ClientClass, method, request, metadata = {}) {
+    return new RequestControl(this.#executeUnary(ClientClass, method, request, metadata));
+  }
+
+  /**
+   * Server-streaming RPC — returns a StreamControl.
+   *
+   * @param {Function} ClientClass — generated grpc-web client
+   * @param {string} method — method name on the client
+   * @param {*} request — protobuf request message
+   * @param {Record<string, string>} [metadata] — per-call metadata
+   */
+  serverStream(ClientClass, method, request, metadata = {}) {
+    return new StreamControl(this.#prepareStream(ClientClass, method, request, metadata));
+  }
+
+  /** Update default metadata (e.g. after token refresh). */
+  setMetadata(key, value) {
+    this.#metadata[key] = value;
+  }
+
+  /** Remove a metadata key. */
+  removeMetadata(key) {
+    delete this.#metadata[key];
+  }
+
+  /** Discard cached client instances (e.g. after host change). */
+  clearClients() {
+    this.#clients.clear();
+  }
+
+  // ── Internal ───────────────────────────────────────────────
+
+  async #buildMetadata(extra) {
+    let meta = { ...this.#metadata, ...extra };
+
+    for (const interceptor of this.#interceptors) {
+      const result = await interceptor(meta);
+      if (!result) {
+        throw new GrpcError(GrpcStatus.CANCELLED, 'Request cancelled by interceptor');
+      }
+      meta = result;
+    }
+
+    return meta;
+  }
+
+  async #runResponseInterceptors(data, error) {
+    let currentData = data;
+    let currentError = error;
+
+    for (const interceptor of this.#responseInterceptors) {
+      const result = await interceptor({ data: currentData, error: currentError });
+      currentData = result?.data !== undefined ? result.data : currentData;
+      currentError = result?.error !== undefined ? result.error : currentError;
+    }
+
+    if (currentError) throw currentError;
+    return currentData;
+  }
+
+  async #executeUnary(ClientClass, method, request, metadata) {
+    const meta = await this.#buildMetadata(metadata);
+    const client = this.client(ClientClass);
+
+    let data = null;
+    let error = null;
+
+    try {
+      data = await new Promise((resolve, reject) => {
+        client[method](request, meta, (err, response) => {
+          if (err) {
+            reject(new GrpcError(err.code, err.message, err.metadata));
+          } else {
+            resolve(response);
+          }
+        });
+      });
+    } catch (e) {
+      error = e;
+    }
+
+    return this.#runResponseInterceptors(data, error);
+  }
+
+  async #prepareStream(ClientClass, method, request, metadata) {
+    const meta = await this.#buildMetadata(metadata);
+    const client = this.client(ClientClass);
+    return client[method](request, meta);
   }
 }
 

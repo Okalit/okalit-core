@@ -9,11 +9,15 @@ let _debugMode = false;
 export function setDebugMode(enabled) {
   _debugMode = enabled;
   if (enabled) {
+    window.getChannelAll = getChannelAll;
+
     console.log(
       '%c[Okalit Debug]%c Channel debug mode enabled',
       'color: #fff; background: #6C5CE7; padding: 2px 6px; border-radius: 3px;',
       'color: #6C5CE7;'
     );
+  } else {
+    delete window.getChannelAll;
   }
 }
 
@@ -47,8 +51,12 @@ export function defineChannel(name, options = {}) {
  */
 export function clearChannelsByScope(scope) {
   for (const [name, channel] of registry) {
-    if (channel.ephemeral) continue;
     if (channel._scope !== scope) continue;
+
+    if (channel.ephemeral) {
+      registry.delete(name);
+      continue;
+    }
 
     // Reset signal to initial value
     channel.signal.value = structuredClone(channel._initialValue);
@@ -58,7 +66,19 @@ export function clearChannelsByScope(scope) {
     if (storage) {
       storage.removeItem(`okalit:channel:${name}`);
     }
+
+    registry.delete(name);
   }
+}
+
+export function getChannelAll() {
+  return Array.from(registry.entries()).map(([name, channel]) => ({
+    name,
+    scope: channel._scope,
+    ephemeral: channel.ephemeral,
+    value: channel.value,
+    subscribersCount: channel.subscribers ? channel.subscribers.size : 0
+  }));
 }
 
 export function getChannel(name) {

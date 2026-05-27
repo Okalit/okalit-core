@@ -117,6 +117,10 @@ export const PageMixin = (Base) => class extends Base {
   navigate(path, options = {}) {
     Router.getInstance()?.navigate(path, options);
   }
+
+  backRoute() {
+    Router.getInstance()?.back();
+  }
 };
 
 export { navigate };

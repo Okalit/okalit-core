@@ -59,21 +59,33 @@ export class Okalit extends LitElement {
     const props = this.constructor.props;
     if (!props.length) return;
 
+    const previousValues = {};
     for (const propDef of props) {
       const [name] = Object.entries(propDef)[0];
-      let previous = this._signals[name].value;
-
-      const dispose = effect(() => {
-        const current = this._signals[name].value;
-        if (previous !== current) {
-          const old = previous;
-          previous = current;
-          this.onChange({ [name]: { previous: old, current } });
-        }
-      });
-
-      this._dispose.push(dispose);
+      previousValues[name] = this._signals[name].value;
     }
+
+    const dispose = effect(() => {
+      const changes = {};
+      let hasChanges = false;
+
+      for (const propDef of props) {
+        const [name] = Object.entries(propDef)[0];
+        const current = this._signals[name].value; 
+
+        if (previousValues[name] !== current) {
+          changes[name] = { previous: previousValues[name], current };
+          previousValues[name] = current;
+          hasChanges = true;
+        }
+      }
+
+      if (hasChanges) {
+        this.onChange(changes);
+      }
+    });
+
+    this._dispose.push(dispose);
   }
 
   connectedCallback() {
