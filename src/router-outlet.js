@@ -56,14 +56,26 @@ export class OkalitRouter extends HTMLElement {
 
     this._currentComponent = route.component;
 
-    // Remove the previous element without destroying the style
+    const el = document.createElement(route.component);
+    this.shadowRoot.appendChild(el);
+
+    // Wait for the new element to complete its first render before removing the old one
+    if (el.updateComplete) {
+      await el.updateComplete;
+    }
+
+    // Bail out if a newer render was triggered while awaiting
+    if (version !== this._renderVersion) {
+      el.remove();
+      return;
+    }
+
+    // Remove the previous element after the new one is ready
     if (this._currentElement) {
       this._currentElement.remove();
     }
 
-    const el = document.createElement(route.component);
     this._currentElement = el;
-    this.shadowRoot.appendChild(el);
   }
 }
 

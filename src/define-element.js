@@ -1,9 +1,8 @@
-export function defineElement({ tag, styles = [], props = [], params = [] }) {
+export function defineElement({ tag, styles = [], props = [] }) {
   return function (cls, context) {
     // Inject styles, props and params as static properties on the class
     cls.styles = styles;
     cls.props = props;
-    cls.params = params;
 
     // Build a map of prop name → type config for attribute coercion
     const propMap = {};

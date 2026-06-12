@@ -13,10 +13,12 @@ export class Okalit extends LitElement {
     this._dispose = [];
     this._signals = {};
     this._reactiveEffect = null;
+    this._channelsInitialized = false;
 
     this._initProps();
     this._initChannelDisposers = initChannels(this);
     this._dispose.push(...this._initChannelDisposers);
+    this._channelsInitialized = true;
   }
 
   createRenderRoot() {
@@ -93,7 +95,7 @@ export class Okalit extends LitElement {
     this._syncAttributes();
 
     // Re-initialize channels if reconnecting after a disconnect
-    if (this._initChannelDisposers.length === 0 && this.constructor.channels) {
+    if (!this._channelsInitialized && this.constructor.channels) {
       this._initChannelDisposers = initChannels(this);
       this._dispose.push(...this._initChannelDisposers);
     }
@@ -117,7 +119,10 @@ export class Okalit extends LitElement {
         super.update(changedProperties);
         firstRun = false;
       } else {
-        this.requestUpdate();
+        // Defer re-render to avoid triggering Lit's "update after update" warning.
+        // Nested effects from child components can cause the signal system to
+        // re-evaluate this effect synchronously during _$didUpdate.
+        queueMicrotask(() => this.requestUpdate());
       }
     });
   }
@@ -135,6 +140,7 @@ export class Okalit extends LitElement {
     for (const dispose of this._dispose) dispose();
     this._dispose = [];
     this._initChannelDisposers = [];
+    this._channelsInitialized = false;
   }
 
   // Hook added for the initial DOM render
