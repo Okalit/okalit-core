@@ -189,7 +189,7 @@ function matchPath(pattern, path) {
   const params = {};
   for (let i = 0; i < patternParts.length; i++) {
     if (patternParts[i].startsWith(':')) {
-      params[patternParts[i].slice(1)] = pathParts[i];
+      params[patternParts[i].slice(1)] = decodeParam(pathParts[i]);
     } else if (patternParts[i] !== pathParts[i]) {
       return null;
     }
@@ -210,13 +210,25 @@ function matchPrefix(pattern, path) {
   const params = {};
   for (let i = 0; i < patternParts.length; i++) {
     if (patternParts[i].startsWith(':')) {
-      params[patternParts[i].slice(1)] = pathParts[i];
+      params[patternParts[i].slice(1)] = decodeParam(pathParts[i]);
     } else if (patternParts[i] !== pathParts[i]) {
       return null;
     }
   }
 
   return { params, exact: patternParts.length === pathParts.length };
+}
+
+/**
+ * Safely decode a URL segment. Returns the original value
+ * if decoding fails (malformed percent-encoding).
+ */
+function decodeParam(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 // Navigation helper for use outside components

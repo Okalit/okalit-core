@@ -31,3 +31,24 @@ export const outEvent = function (context, name, detail) {
     composed: true,
   }));
 }
+
+const HTML_ESCAPE_MAP = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;',
+};
+
+/**
+ * Escape a string for safe insertion into HTML contexts.
+ * Use this when you MUST use innerHTML or similar unsafe APIs with user-provided data.
+ * Not needed with Lit's html`` — it escapes by default.
+ *
+ * @param {string} str
+ * @returns {string}
+ */
+export const escapeHtml = function (str) {
+  if (typeof str !== 'string') return String(str ?? '');
+  return str.replace(/[&<>"']/g, (ch) => HTML_ESCAPE_MAP[ch]);
+}

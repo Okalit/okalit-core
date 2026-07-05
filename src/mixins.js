@@ -1,7 +1,8 @@
 import { html} from 'lit';
 import { Router, navigate } from './router.js';
 import { createI18n } from './i18n.js';
-import { setDebugMode } from './channel.js';
+import { setDebugMode, setObfuscateMode } from './channel.js';
+import { escapeHtml } from './utils.js';
 import './router-outlet.js';
 
 /**
@@ -32,6 +33,10 @@ export const AppMixin = (Base) => class extends Base {
 
     if (this.constructor.config.modeDebug) {
       setDebugMode(true);
+    }
+
+    if (this.constructor.config.obfuscateChannels) {
+      setObfuscateMode(true);
     }
 
     this._router = new Router(this.constructor.config.routes);
@@ -112,6 +117,26 @@ export const PageMixin = (Base) => class extends Base {
 
   get queryParams() {
     return Router.getInstance()?.query.value || {};
+  }
+
+  /**
+   * Get an HTML-escaped route param, safe for innerHTML/unsafe contexts.
+   * Not needed when using Lit's html`` (it escapes by default).
+   *
+   * @param {string} name — param name (e.g. 'id')
+   * @returns {string}
+   */
+  safeParam(name) {
+    return escapeHtml(this.routeParams[name] ?? '');
+  }
+
+  /**
+   * Get an HTML-escaped query param.
+   * @param {string} name
+   * @returns {string}
+   */
+  safeQuery(name) {
+    return escapeHtml(this.queryParams[name] ?? '');
   }
 
   navigate(path, options = {}) {

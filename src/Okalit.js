@@ -13,6 +13,7 @@ export class Okalit extends LitElement {
     this._dispose = [];
     this._signals = {};
     this._reactiveEffect = null;
+    this._propsEffect = null;
     this._channelsInitialized = false;
 
     this._initProps();
@@ -23,10 +24,14 @@ export class Okalit extends LitElement {
 
   createRenderRoot() {
     const root = super.createRenderRoot();
-    if (this.constructor.styles?.length) {
-      const sheet = new CSSStyleSheet();
-      sheet.replaceSync(this.constructor.styles.join('\n'));
-      root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
+    const ctor = this.constructor;
+
+    if (ctor.styles?.length) {
+      if (!ctor.__sheet) {
+        ctor.__sheet = new CSSStyleSheet();
+        ctor.__sheet.replaceSync(ctor.styles.join('\n'));
+      }
+      root.adoptedStyleSheets = [...root.adoptedStyleSheets, ctor.__sheet];
     }
 
     return root;
@@ -61,6 +66,12 @@ export class Okalit extends LitElement {
     const props = this.constructor.props;
     if (!props.length) return;
 
+    // Dispose previous watcher if reconnecting
+    if (this._propsEffect) {
+      this._propsEffect();
+      this._propsEffect = null;
+    }
+
     const previousValues = {};
     for (const propDef of props) {
       const [name] = Object.entries(propDef)[0];
@@ -87,7 +98,7 @@ export class Okalit extends LitElement {
       }
     });
 
-    this._dispose.push(dispose);
+    this._propsEffect = dispose;
   }
 
   connectedCallback() {
@@ -135,6 +146,12 @@ export class Okalit extends LitElement {
     if (this._reactiveEffect) {
       this._reactiveEffect();
       this._reactiveEffect = null;
+    }
+
+    // Clean up props watcher
+    if (this._propsEffect) {
+      this._propsEffect();
+      this._propsEffect = null;
     }
 
     for (const dispose of this._dispose) dispose();

@@ -159,9 +159,13 @@ const _registry = new Map();
 export function service(name) {
   return function (cls, context) {
     context.addInitializer(function () {
-      if (!_registry.has(name)) {
-        _registry.set(name, new cls());
+      if (_registry.has(name)) {
+        throw new Error(
+          `[service] Duplicate registration: "${name}" is already registered. ` +
+          `Check that only one class uses @service("${name}").`
+        );
       }
+      _registry.set(name, new cls());
     });
   };
 }
@@ -180,6 +184,48 @@ export function inject(name) {
   return instance;
 }
 
+// ── RateLimiter (Token Bucket) ─────────────────────────────────
+
+class RateLimiter {
+  #tokens;
+  #maxTokens;
+  #refillRate;
+  #lastRefill;
+
+  /**
+   * @param {Object} opts
+   * @param {number} opts.maxRequests — max tokens (burst capacity)
+   * @param {number} opts.perSeconds — refill window in seconds
+   */
+  constructor({ maxRequests = 10, perSeconds = 1 } = {}) {
+    this.#maxTokens = maxRequests;
+    this.#tokens = maxRequests;
+    this.#refillRate = maxRequests / perSeconds;
+    this.#lastRefill = Date.now();
+  }
+
+  #refill() {
+    const now = Date.now();
+    const elapsed = (now - this.#lastRefill) / 1000;
+    this.#tokens = Math.min(this.#maxTokens, this.#tokens + elapsed * this.#refillRate);
+    this.#lastRefill = now;
+  }
+
+  async acquire() {
+    this.#refill();
+
+    if (this.#tokens >= 1) {
+      this.#tokens--;
+      return;
+    }
+
+    const waitMs = ((1 - this.#tokens) / this.#refillRate) * 1000;
+    await new Promise(resolve => setTimeout(resolve, waitMs));
+    this.#refill();
+    this.#tokens--;
+  }
+}
+
 // ── Shared fetch infrastructure ────────────────────────────────
 
 class BaseService {
@@ -187,15 +233,21 @@ class BaseService {
   _cache = new Map();
   _cacheEnabled = false;
   _cacheTTL = 0;
+  _timeout = 0;
   _interceptors = [];
   _responseInterceptors = [];
+  _rateLimiter = null;
+  _retryConfig = { attempts: 1, backoff: 1000, factor: 2 };
 
-  _configureMixin({ headers, cache, cacheTTL, interceptors, responseInterceptors } = {}) {
+  _configureMixin({ headers, cache, cacheTTL, timeout, interceptors, responseInterceptors, rateLimit, retry } = {}) {
     if (headers !== undefined) this._headers = { ...this._headers, ...headers };
     if (cache !== undefined) this._cacheEnabled = cache;
     if (cacheTTL !== undefined) this._cacheTTL = cacheTTL;
+    if (timeout !== undefined) this._timeout = timeout;
     if (interceptors !== undefined) this._interceptors = Array.isArray(interceptors) ? interceptors : [interceptors];
     if (responseInterceptors !== undefined) this._responseInterceptors = Array.isArray(responseInterceptors) ? responseInterceptors : [responseInterceptors];
+    if (rateLimit) this._rateLimiter = new RateLimiter(rateLimit);
+    if (retry) this._retryConfig = { ...this._retryConfig, ...retry };
   }
 
   async _runInterceptors(url, options) {
@@ -270,8 +322,11 @@ export class OkalitService extends BaseService {
    * @param {Record<string, string>} [opts.headers]
    * @param {boolean} [opts.cache]    — enable/disable in-memory cache (default: false)
    * @param {number}  [opts.cacheTTL] — cache lifetime in ms (0 = forever until clearCache)
+   * @param {number}  [opts.timeout]  — request timeout in ms (0 = no timeout)
    * @param {Object[]} [opts.interceptors] — request interceptors
    * @param {Object[]} [opts.responseInterceptors] — response interceptors
+   * @param {{ maxRequests?: number, perSeconds?: number }} [opts.rateLimit] — token bucket rate limiter
+   * @param {{ attempts?: number, backoff?: number, factor?: number }} [opts.retry] — retry with exponential backoff (only retries 5xx and timeouts)
    */
   configure({ baseUrl, ...rest } = {}) {
     if (baseUrl !== undefined) this.#baseUrl = baseUrl.replace(/\/+$/, '');
@@ -303,6 +358,13 @@ export class OkalitService extends BaseService {
     }));
   }
 
+  patch(path, body) {
+    return new RequestControl(this.#request(`${this.#baseUrl}${path}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }));
+  }
+
   delete(path) {
     return new RequestControl(this.#request(`${this.#baseUrl}${path}`, {
       method: 'DELETE',
@@ -324,32 +386,68 @@ export class OkalitService extends BaseService {
   // ── Internal ───────────────────────────────────────────────
 
   async #request(url, options, cacheable = false) {
+    // Rate-limit: wait for an available token before proceeding
+    if (this._rateLimiter) await this._rateLimiter.acquire();
+
     const intercepted = await this._runInterceptors(url, options);
 
     const cached = this._getCached(intercepted.url, cacheable);
-    let promise;
-
     if (cached) {
-      promise = cached.status === 'pending' ? cached.promise : Promise.resolve(cached.data);
-    } else {
-      promise = fetch(intercepted.url, intercepted.options).then(async (res) => {
-        if (!res.ok) {
-          let body;
-          try { body = await res.json(); } catch { body = { message: res.statusText }; }
-          throw new HttpError(res.status, res.statusText, body);
-        }
-        const text = await res.text();
-        return text ? JSON.parse(text) : null;
-      });
-
-      if (cacheable) this._setCache(intercepted.url, promise);
+      const data = cached.status === 'pending' ? await cached.promise : cached.data;
+      return this._runResponseInterceptors(data, null);
     }
 
-    let data = null;
-    let error = null;
-    try { data = await promise; } catch (e) { error = e; }
+    const { attempts, backoff, factor } = this._retryConfig;
 
-    return this._runResponseInterceptors(data, error);
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        const data = await this.#executeFetch(intercepted, cacheable);
+        return this._runResponseInterceptors(data, null);
+      } catch (err) {
+        const isRetryable = (err instanceof HttpError && err.status >= 500) || err.name === 'AbortError';
+        const isLast = attempt === attempts - 1;
+
+        if (!isRetryable || isLast) {
+          return this._runResponseInterceptors(null, err);
+        }
+
+        const delay = backoff * Math.pow(factor, attempt);
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
+  }
+
+  async #executeFetch(intercepted, cacheable) {
+    let controller;
+    let timeoutId;
+    const fetchOptions = { ...intercepted.options };
+
+    if (this._timeout > 0) {
+      controller = new AbortController();
+      fetchOptions.signal = controller.signal;
+      timeoutId = setTimeout(() => controller.abort(), this._timeout);
+    }
+
+    const promise = fetch(intercepted.url, fetchOptions).then(async (res) => {
+      if (!res.ok) {
+        let body;
+        try { body = await res.json(); } catch { body = { message: res.statusText }; }
+        throw new HttpError(res.status, res.statusText, body);
+      }
+      const text = await res.text();
+      return text ? JSON.parse(text) : null;
+    }).catch((err) => {
+      if (err.name === 'AbortError') {
+        throw new HttpError(0, 'Request Timeout', { message: `Request exceeded ${this._timeout}ms` });
+      }
+      throw err;
+    }).finally(() => {
+      if (timeoutId) clearTimeout(timeoutId);
+    });
+
+    if (cacheable) this._setCache(intercepted.url, promise);
+
+    return promise;
   }
 }
 

@@ -1,10 +1,11 @@
 export { Okalit, signal, computed, effect, batch } from './Okalit.js';
 export { html } from 'lit'; 
 export { defineElement } from './define-element.js';
-export { defineChannel, getChannel, getChannelValueStorage, setDebugMode } from './channel.js';
+export { defineChannel, getChannel, getChannelValueStorage, setDebugMode, setObfuscateMode } from './channel.js';
 export { Router, navigate } from './router.js';
 export { AppMixin, ModuleMixin, PageMixin } from './mixins.js';
 export { t, getI18n } from './i18n.js';
 export { OkalitService, OkalitGraphqlService, OkalitSocketService, OkalitGrpcService, RequestControl, StreamControl, HttpError, GraphqlError, GrpcError, GrpcStatus, service, inject } from './service.js';
 export { OIdle, OWhen, OViewport } from './performance.js';
 export { gql } from './gql.js';
+export { escapeHtml, queryShadowSelector, outEvent } from './utils.js';

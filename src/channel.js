@@ -6,6 +6,30 @@ const registry = new Map();
 // Debug mode flag — toggled by AppMixin when modeDebug: true
 let _debugMode = false;
 
+// Obfuscation flag + key — toggled by AppMixin when obfuscateChannels: true
+let _obfuscate = false;
+const _obfuscateKey = 'okalit:xk';
+
+export function setObfuscateMode(enabled) {
+  _obfuscate = enabled;
+}
+
+function xorEncode(str, key) {
+  let result = '';
+  for (let i = 0; i < str.length; i++) {
+    result += String.fromCharCode(str.charCodeAt(i) ^ key.charCodeAt(i % key.length));
+  }
+  return result;
+}
+
+function obfuscate(jsonString) {
+  return btoa(xorEncode(jsonString, _obfuscateKey));
+}
+
+function deobfuscate(encoded) {
+  return xorEncode(atob(encoded), _obfuscateKey);
+}
+
 export function setDebugMode(enabled) {
   _debugMode = enabled;
   if (enabled) {
@@ -93,9 +117,12 @@ export function getChannelValueStorage(name, storageType = 'local') {
   if (raw === null) return null;
 
   try {
-    return JSON.parse(raw);
+    const jsonString = _obfuscate ? deobfuscate(raw) : raw;
+    return JSON.parse(jsonString);
   } catch {
-    return raw;
+    console.warn(`[okalit-channel] Corrupted JSON in storage for "${name}".`);
+    storage.removeItem(`okalit:channel:${name}`);
+    return null;
   }
 }
 
@@ -158,18 +185,74 @@ function loadFromStorage(name, options) {
   const raw = storage.getItem(`okalit:channel:${name}`);
   if (raw === null) return undefined;
 
+  let parsed;
   try {
-    return JSON.parse(raw);
+    const jsonString = _obfuscate ? deobfuscate(raw) : raw;
+    parsed = JSON.parse(jsonString);
   } catch {
-    return raw;
+    console.warn(`[okalit-channel] Corrupted JSON in storage for "${name}", discarding.`);
+    storage.removeItem(`okalit:channel:${name}`);
+    return undefined;
   }
+
+  // Custom validator takes priority
+  if (typeof options.validate === 'function') {
+    if (!options.validate(parsed)) {
+      console.warn(`[okalit-channel] Validation failed for "${name}", discarding stored value.`);
+      storage.removeItem(`okalit:channel:${name}`);
+      return undefined;
+    }
+    return parsed;
+  }
+
+  // Structural type validation against initialValue
+  if (options.initialValue !== undefined && !matchesShape(parsed, options.initialValue)) {
+    console.warn(`[okalit-channel] Type mismatch for "${name}", discarding stored value.`);
+    storage.removeItem(`okalit:channel:${name}`);
+    return undefined;
+  }
+
+  return parsed;
+}
+
+/**
+ * Shallow structural validation — checks that the parsed value
+ * matches the basic type/shape of the expected initialValue.
+ */
+function matchesShape(value, expected) {
+  if (expected === null || expected === undefined) return true;
+
+  const expectedType = typeof expected;
+  const valueType = typeof value;
+
+  // Primitives: type must match
+  if (expectedType !== 'object') return valueType === expectedType;
+
+  // null check
+  if (value === null) return false;
+
+  // Array check
+  if (Array.isArray(expected)) return Array.isArray(value);
+
+  // Object: verify it's a plain object and top-level keys have matching types
+  if (valueType !== 'object' || Array.isArray(value)) return false;
+
+  for (const key of Object.keys(expected)) {
+    if (!(key in value)) return false;
+    if (expected[key] !== null && expected[key] !== undefined) {
+      if (typeof value[key] !== typeof expected[key]) return false;
+    }
+  }
+
+  return true;
 }
 
 function saveToStorage(name, value, options) {
   const storage = getStorage(options.persist);
   if (!storage) return;
 
-  storage.setItem(`okalit:channel:${name}`, JSON.stringify(value));
+  const jsonString = JSON.stringify(value);
+  storage.setItem(`okalit:channel:${name}`, _obfuscate ? obfuscate(jsonString) : jsonString);
 }
 
 function getStorage(persist) {
