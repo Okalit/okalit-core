@@ -1,19 +1,41 @@
 import { signal, effect, untracked } from 'uhtml';
 
-// Global registry: one channel instance per name, shared across all components
+/**
+ * Global registry: stores one channel instance per name, shared across all components.
+ * Acts as the single source of truth for inter-component reactive communication.
+ *
+ * @type {Map<string, ChannelInstance>}
+ */
 const registry = new Map();
 
-// Debug mode flag — toggled by AppMixin when modeDebug: true
+/** @type {boolean} — Debug mode flag, toggled by AppMixin when modeDebug: true. */
 let _debugMode = false;
 
-// Obfuscation flag + key — toggled by AppMixin when obfuscateChannels: true
+/** @type {boolean} — Obfuscation flag, toggled by AppMixin when obfuscateChannels: true. */
 let _obfuscate = false;
+
+/** @type {string} — XOR key used for storage obfuscation (not encryption). */
 const _obfuscateKey = 'okalit:xk';
 
+/**
+ * Enables or disables obfuscation of channel values persisted to storage.
+ * When enabled, values are XOR-encoded before writing to localStorage/sessionStorage.
+ * Note: This is NOT encryption — it only deters casual inspection.
+ *
+ * @param {boolean} enabled — Whether to enable obfuscation.
+ */
 export function setObfuscateMode(enabled) {
   _obfuscate = enabled;
 }
 
+/**
+ * XOR-encodes a string using a repeating key.
+ * Used internally for storage obfuscation.
+ *
+ * @param {string} str — The input string to encode.
+ * @param {string} key — The repeating XOR key.
+ * @returns {string} The XOR-encoded string.
+ */
 function xorEncode(str, key) {
   let result = '';
   for (let i = 0; i < str.length; i++) {
@@ -22,10 +44,22 @@ function xorEncode(str, key) {
   return result;
 }
 
+/**
+ * Obfuscates a JSON string for storage (XOR + base64).
+ *
+ * @param {string} jsonString — Serialized JSON to obfuscate.
+ * @returns {string} Base64-encoded obfuscated string.
+ */
 function obfuscate(jsonString) {
   return btoa(xorEncode(jsonString, _obfuscateKey));
 }
 
+/**
+ * Deobfuscates a previously obfuscated string from storage.
+ *
+ * @param {string} encoded — Base64-encoded obfuscated string.
+ * @returns {string} The original JSON string.
+ */
 function deobfuscate(encoded) {
   return xorEncode(atob(encoded), _obfuscateKey);
 }
@@ -95,6 +129,12 @@ export function clearChannelsByScope(scope) {
   }
 }
 
+/**
+ * Returns a snapshot of all registered channels with their metadata.
+ * Available on `window.getChannelAll` when debug mode is enabled.
+ *
+ * @returns {Array<{ name: string, scope: string, ephemeral: boolean, value: any, subscribersCount: number }>}
+ */
 export function getChannelAll() {
   return Array.from(registry.entries()).map(([name, channel]) => ({
     name,
@@ -105,10 +145,24 @@ export function getChannelAll() {
   }));
 }
 
+/**
+ * Retrieves a channel instance by name from the global registry.
+ *
+ * @param {string} name — The channel identifier.
+ * @returns {ChannelInstance|null} The channel instance or null if not found.
+ */
 export function getChannel(name) {
   return !registry.has(name) ? null : registry.get(name);
 }
 
+/**
+ * Retrieves a channel's persisted value directly from storage
+ * without requiring the channel to be initialized.
+ *
+ * @param {string} name — The channel identifier.
+ * @param {'local'|'session'} [storageType='local'] — Storage backend to read from.
+ * @returns {*|null} The parsed value or null if not found/corrupted.
+ */
 export function getChannelValueStorage(name, storageType = 'local') {
   const storage = getStorage(storageType);
   if (!storage) return null;
@@ -178,6 +232,15 @@ function getOrCreateChannel(name, options) {
   return channel;
 }
 
+/**
+ * Loads and validates a channel value from persistent storage.
+ * Applies custom validators and structural type checking against the initial value.
+ *
+ * @private
+ * @param {string} name — Channel identifier.
+ * @param {Object} options — Channel configuration with persist, validate, and initialValue.
+ * @returns {*|undefined} The stored value if valid, undefined otherwise.
+ */
 function loadFromStorage(name, options) {
   const storage = getStorage(options.persist);
   if (!storage) return undefined;
@@ -247,6 +310,15 @@ function matchesShape(value, expected) {
   return true;
 }
 
+/**
+ * Persists a channel value to the configured storage backend.
+ * Applies obfuscation if enabled.
+ *
+ * @private
+ * @param {string} name — Channel identifier.
+ * @param {*} value — The value to persist.
+ * @param {Object} options — Channel configuration with persist mode.
+ */
 function saveToStorage(name, value, options) {
   const storage = getStorage(options.persist);
   if (!storage) return;
@@ -255,6 +327,13 @@ function saveToStorage(name, value, options) {
   storage.setItem(`okalit:channel:${name}`, _obfuscate ? obfuscate(jsonString) : jsonString);
 }
 
+/**
+ * Returns the appropriate Web Storage API based on the persist mode.
+ *
+ * @private
+ * @param {'memory'|'local'|'session'} persist — Storage mode.
+ * @returns {Storage|null} localStorage, sessionStorage, or null for memory-only.
+ */
 function getStorage(persist) {
   if (persist === 'local') return localStorage;
   if (persist === 'session') return sessionStorage;
@@ -336,6 +415,16 @@ export function initChannels(instance) {
 
 // --- Debug logging helpers ---
 
+/**
+ * Logs a channel SET event to the console in debug mode.
+ * Shows sender, value, time, and subscriber list in a collapsible group.
+ *
+ * @private
+ * @param {string} channelName — Name of the channel.
+ * @param {string} senderTag — Tag name of the component setting the value.
+ * @param {*} value — The value being set.
+ * @param {ChannelInstance} channel — The channel instance.
+ */
 function _logChannelSet(channelName, senderTag, value, channel) {
   const time = new Date();
   const receivers = channel._subscriberMeta
@@ -355,6 +444,15 @@ function _logChannelSet(channelName, senderTag, value, channel) {
   console.groupEnd();
 }
 
+/**
+ * Logs a channel receive event to the console in debug mode.
+ *
+ * @private
+ * @param {string} channelName — Name of the channel.
+ * @param {string} receiverTag — Tag name of the receiving component.
+ * @param {string} methodName — Name of the callback method invoked.
+ * @param {*} value — The received value.
+ */
 function _logChannelReceive(channelName, receiverTag, methodName, value) {
   const time = new Date().toLocaleTimeString('en-US', { hour12: false, fractionalSecondDigits: 3 });
 

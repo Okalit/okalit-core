@@ -7,19 +7,27 @@ import './router-outlet.js';
 
 /**
  * Default layout function — simply renders the content as is.
- * @param {*} content 
- * @returns 
+ *
+ * @param {*} content — The router outlet content.
+ * @returns {*} The unchanged content.
  */
 const DEFAULT_LAYOUT = (content) => content;
 
 /**
- * AppMixin — for the root application component.
- * Initializes the router with the provided routes.
+ * AppMixin — Mixin for the root application component.
+ * Initializes the router, i18n, debug mode, and channel obfuscation.
+ * Should be applied to a single top-level component.
  *
- * Usage:
- *   class MainApp extends AppMixin(Okalit) {
- *     static routes = [...];
- *   }
+ * @param {typeof Okalit} Base — The base class to extend.
+ * @returns {typeof Okalit} Extended class with router and i18n capabilities.
+ *
+ * @example
+ * class MainApp extends AppMixin(Okalit) {
+ *   static config = {
+ *     routes: [...],
+ *     i18n: { default: 'en', locales: ['en', 'es'] },
+ *   };
+ * }
  */
 export const AppMixin = (Base) => class extends Base {
   static config = {
@@ -47,14 +55,31 @@ export const AppMixin = (Base) => class extends Base {
     }
   }
 
+  /**
+   * Switches the application locale and triggers reactive i18n updates.
+   *
+   * @param {string} locale — Target locale code (e.g. 'es', 'en').
+   * @returns {Promise<void>}
+   */
   async switchLocale(locale) {
     await this._i18n?.setLocale(locale);
   }
 
+  /**
+   * Returns the router instance for programmatic navigation.
+   *
+   * @returns {Router}
+   */
   get router() {
     return this._router;
   }
 
+  /**
+   * Navigates to a path using the application router.
+   *
+   * @param {string} path — Target path.
+   * @param {Object} [options] — Navigation options ({ replace: boolean }).
+   */
   navigate(path, options = {}) {
     this._router.navigate(path, options);
   }
@@ -71,21 +96,34 @@ export const AppMixin = (Base) => class extends Base {
 };
 
 /**
- * ModuleMixin — for feature modules that group pages.
- * Provides a nested <okalit-router> for child routes.
+ * ModuleMixin — Mixin for feature module components that group related pages.
+ * Provides a nested <okalit-router> for rendering child routes and
+ * exposes router access for navigation within the module.
  *
- * Usage:
- *   class ExampleModule extends ModuleMixin(Okalit) {
- *     render() {
- *       return html`<okalit-router></okalit-router>`;
- *     }
- *   }
+ * @param {typeof Okalit} Base — The base class to extend.
+ * @returns {typeof Okalit} Extended class with nested routing.
+ *
+ * @example
+ * class CommunityModule extends ModuleMixin(Okalit) {
+ *   // Child routes render inside this module's <okalit-router>
+ * }
  */
 export const ModuleMixin = (Base) => class extends Base {
+  /**
+   * Returns the global router instance.
+   *
+   * @returns {Router}
+   */
   get router() {
     return Router.getInstance();
   }
 
+  /**
+   * Navigates to a path using the global router.
+   *
+   * @param {string} path — Target path.
+   * @param {Object} [options] — Navigation options.
+   */
   navigate(path, options = {}) {
     Router.getInstance()?.navigate(path, options);
   }
@@ -98,13 +136,19 @@ export const ModuleMixin = (Base) => class extends Base {
 };
 
 /**
- * PageMixin — for individual pages within a module.
- * Provides router access and navigation helpers.
+ * PageMixin — Mixin for individual page components within a module.
+ * Provides router access, route/query param getters with XSS-safe helpers,
+ * and navigation utilities.
  *
- * Usage:
- *   class HomePage extends PageMixin(Okalit) {
- *     render() { ... }
+ * @param {typeof Okalit} Base — The base class to extend.
+ * @returns {typeof Okalit} Extended class with page-level helpers.
+ *
+ * @example
+ * class UserPage extends PageMixin(Okalit) {
+ *   render() {
+ *     return html`<h1>User: ${this.routeParams.id}</h1>`;
  *   }
+ * }
  */
 export const PageMixin = (Base) => class extends Base {
   get router() {

@@ -1,5 +1,10 @@
 // ── Shared styles ──────────────────────────────────────────────
 
+/**
+ * Default CSS for lazy-loading wrapper elements.
+ * Shows the default slot only when [loaded] attribute is present;
+ * shows fallback slot otherwise.
+ */
 const SHARED_STYLES = `
   :host { display: contents; }
   ::slotted([slot="fallback"]) { display: none; }
@@ -10,9 +15,11 @@ const SHARED_STYLES = `
 // ── Shared loader logic ────────────────────────────────────────
 
 /**
- * Normalise .loader — accepts a single function or an array.
- * Resolves all imports with Promise.all and flips #isLoaded.
- * On error, dispatches 'o-error' on the host element.
+ * Executes the loader function(s) on the host element.
+ * Handles single functions or arrays, sets the [loaded] attribute on success,
+ * and dispatches an 'o-error' CustomEvent on failure.
+ *
+ * @param {HTMLElement} host — The lazy-loading element (OIdle, OWhen, or OViewport).
  */
 async function executeLoader(host) {
   if (host._done || host._loading) return;
@@ -37,6 +44,11 @@ async function executeLoader(host) {
   }
 }
 
+/**
+ * Applies the shared Shadow DOM structure (styles + slots) to a host element.
+ *
+ * @param {ShadowRoot} shadowRoot — The shadow root to populate.
+ */
 function applySharedSetup(shadowRoot) {
   const style = document.createElement('style');
   style.textContent = SHARED_STYLES;
@@ -49,6 +61,19 @@ function applySharedSetup(shadowRoot) {
 
 // ── <o-idle> ───────────────────────────────────────────────────
 
+/**
+ * Lazy-loading element that defers its loader execution until the browser is idle.
+ * Uses `requestIdleCallback` (or falls back to setTimeout) to avoid blocking
+ * the main thread during initial page load.
+ *
+ * @element o-idle
+ *
+ * @example
+ * <o-idle .loader=${() => import('./heavy-module.js')}>
+ *   <heavy-component></heavy-component>
+ *   <span slot="fallback">Loading...</span>
+ * </o-idle>
+ */
 export class OIdle extends HTMLElement {
   _done = false;
   _loading = false;
@@ -99,6 +124,19 @@ export class OIdle extends HTMLElement {
 
 // ── <o-when> ───────────────────────────────────────────────────
 
+/**
+ * Conditional lazy-loading element that executes its loader only when
+ * its `condition` property becomes truthy. Useful for on-demand loading
+ * triggered by user interaction or application state.
+ *
+ * @element o-when
+ *
+ * @example
+ * <o-when .condition=${this.showChat} .loader=${() => import('./chat.js')}>
+ *   <chat-widget></chat-widget>
+ *   <span slot="fallback">Loading chat...</span>
+ * </o-when>
+ */
 export class OWhen extends HTMLElement {
   _done = false;
   _loading = false;
@@ -145,6 +183,19 @@ export class OWhen extends HTMLElement {
 
 // ── <o-viewport> ───────────────────────────────────────────────
 
+/**
+ * Viewport-aware lazy-loading element that executes its loader when
+ * the element enters the visible viewport (via IntersectionObserver).
+ * Ideal for below-the-fold content that should load on scroll.
+ *
+ * @element o-viewport
+ *
+ * @example
+ * <o-viewport .loader=${() => import('./footer-section.js')}>
+ *   <footer-section></footer-section>
+ *   <span slot="fallback">Loading...</span>
+ * </o-viewport>
+ */
 export class OViewport extends HTMLElement {
   _done = false;
   _loading = false;

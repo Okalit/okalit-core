@@ -1,10 +1,29 @@
 import { signal } from 'uhtml';
 import { clearChannelsByScope } from './channel.js';
 
-/** @type {Router|null} */
+/** @type {Router|null} — Singleton reference to the active router instance. */
 let instance = null;
 
+/**
+ * Client-side SPA router with reactive signals, route guards,
+ * nested route matching, and automatic channel scope cleanup.
+ *
+ * Implements a singleton pattern — only one Router can exist at a time.
+ * Initialized by the AppMixin on application startup.
+ *
+ * @example
+ * const router = new Router([
+ *   { path: 'home', component: 'home-page' },
+ *   { path: 'users/:id', component: 'user-page', guards: [authGuard] },
+ * ]);
+ */
 export class Router {
+  /**
+   * Creates the router singleton with the given route definitions.
+   * If an instance already exists, returns it (singleton).
+   *
+   * @param {Array<RouteConfig>} routes — Flat or nested route definitions.
+   */
   constructor(routes = []) {
     if (instance) return instance;
     instance = this;
@@ -25,13 +44,33 @@ export class Router {
     this._pendingPath = window.location.pathname + window.location.search;
   }
 
+  /**
+   * Returns the current router singleton instance.
+   *
+   * @returns {Router|null} The active router or null if not initialized.
+   */
   static getInstance() {
     return instance;
   }
 
+  /**
+   * Programmatically navigate to a new path.
+   * Pushes (or replaces) a history entry and resolves the route.
+   *
+   * @param {string} path — The target path (e.g. '/users/42?tab=posts').
+   * @param {Object} [options] — Navigation options.
+   * @param {boolean} [options.replace=false] — If true, replaces the current history entry.
+   */
   navigate(path, { replace = false } = {}) {
     const [pathname] = path.split('?');
     if (pathname === this.currentPath.value && path === window.location.pathname + window.location.search) return;
+
+    const match = this._matchRoute(this._routes, pathname || '/');
+    if (!match) {
+      console.warn(`[okalit-router] No route matched: ${pathname}`);
+      return;
+    }
+
     if (replace) {
       window.history.replaceState(null, '', path);
     } else {
@@ -40,10 +79,19 @@ export class Router {
     this._resolve(path);
   }
 
+  /**
+   * Navigates back one entry in the browser history stack.
+   */
   back() {
     window.history.back();
   }
 
+  /**
+   * Registers a router outlet (renders matched route components).
+   * If there's a pending path resolution, triggers it immediately.
+   *
+   * @param {OkalitRouter} outlet — The router outlet element to register.
+   */
   registerOutlet(outlet) {
     this._outlets.add(outlet);
     // If there's a pending resolve or an existing route, trigger it
@@ -56,10 +104,19 @@ export class Router {
     }
   }
 
+  /**
+   * Unregisters a router outlet (e.g. when a module is destroyed).
+   *
+   * @param {OkalitRouter} outlet — The router outlet element to remove.
+   */
   unregisterOutlet(outlet) {
     this._outlets.delete(outlet);
   }
 
+  /**
+   * Destroys the router singleton, removing event listeners and
+   * clearing the global instance reference.
+   */
   destroy() {
     window.removeEventListener('popstate', this._onPopState);
     instance = null;
@@ -67,10 +124,23 @@ export class Router {
 
   // --- Internal ---
 
+  /**
+   * Handles browser back/forward button navigation events.
+   *
+   * @private
+   */
   _onPopState() {
     this._resolve(window.location.pathname + window.location.search);
   }
 
+  /**
+   * Core route resolution logic. Matches the path against the route tree,
+   * runs guards, updates reactive state, clears scoped channels on route
+   * change, and notifies all registered outlets.
+   *
+   * @private
+   * @param {string} fullPath — Full path including query string.
+   */
   async _resolve(fullPath) {
     const [pathname, search] = fullPath.split('?');
     const path = pathname || '/';
@@ -111,6 +181,16 @@ export class Router {
     }
   }
 
+  /**
+   * Executes route guards sequentially before navigation completes.
+   * Guards can return `false` to cancel navigation, or a string path to redirect.
+   *
+   * @private
+   * @param {Function[]} guards — Array of guard functions to execute.
+   * @param {string} path — The target path being navigated to.
+   * @param {Object} match — The matched route object.
+   * @returns {Promise<boolean>} True if all guards pass, false otherwise.
+   */
   async _runGuards(guards, path, match) {
     if (!guards || !guards.length) return true;
 
@@ -171,6 +251,13 @@ export class Router {
 
 // --- Path utilities ---
 
+/**
+ * Normalizes a URL path by removing duplicate slashes and ensuring
+ * a leading slash.
+ *
+ * @param {string} path — Raw path string.
+ * @returns {string} Normalized path (e.g. '/users/42').
+ */
 function normalizePath(path) {
   return '/' + path.split('/').filter(Boolean).join('/');
 }
@@ -222,6 +309,9 @@ function matchPrefix(pattern, path) {
 /**
  * Safely decode a URL segment. Returns the original value
  * if decoding fails (malformed percent-encoding).
+ *
+ * @param {string} value — URL-encoded path segment.
+ * @returns {string} Decoded string or original value on failure.
  */
 function decodeParam(value) {
   try {
@@ -231,7 +321,13 @@ function decodeParam(value) {
   }
 }
 
-// Navigation helper for use outside components
+/**
+ * Navigation helper for use outside components.
+ * Delegates to the singleton router instance.
+ *
+ * @param {string} path — The target path to navigate to.
+ * @param {Object} [options] — Navigation options (e.g. { replace: true }).
+ */
 export function navigate(path, options) {
   Router.getInstance()?.navigate(path, options);
 }

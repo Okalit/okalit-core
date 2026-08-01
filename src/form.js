@@ -167,7 +167,7 @@ export function createForm({ fields, validateOn = 'blur' } = {}) {
 export const required = (msg = 'Required') =>
   (value) => (!value && value !== 0) ? msg : null;
 
-export const email = (msg = 'Invalid email') =>
+export const isEmail = (msg = 'Invalid email') =>
   (value) => value && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) ? msg : null;
 
 export const minLength = (len, msg) =>

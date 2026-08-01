@@ -1,10 +1,13 @@
 import { signal } from 'uhtml';
 
-// Global signals ensure that the `t()` function can subscribe to them from the very first millisecond,
-// even before the I18n instance is fully constructed.
+/**
+ * Reactive signals for locale tracking — shared globally so that
+ * the `t()` helper can subscribe from any component's render method.
+ */
 const localeSignal = signal('en');
 const versionSignal = signal(0);
 
+/** @type {I18n|null} — Singleton reference to the I18n instance. */
 let instance = null;
 
 /**

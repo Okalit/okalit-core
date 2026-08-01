@@ -4,10 +4,24 @@ import { initChannels } from './channel.js';
 
 export { html, signal, computed, effect, batch };
 
+/**
+ * Base class for all Okalit components.
+ * Extends LitElement with reactive signals, channel subscriptions,
+ * and a simplified lifecycle API.
+ *
+ * @extends LitElement
+ */
 export class Okalit extends LitElement {
+  /** @type {string[]} — Component-scoped CSS styles injected via adoptedStyleSheets. */
   static styles = [];
+
+  /** @type {Array<Record<string, { value: any, type?: Function }>>} — Reactive prop definitions. */
   static props = [];
 
+  /**
+   * Initializes internal state, reactive props, and channel subscriptions.
+   * Called automatically by the browser when the element is constructed.
+   */
   constructor() {
     super();
     this._dispose = [];
@@ -22,6 +36,12 @@ export class Okalit extends LitElement {
     this._channelsInitialized = true;
   }
 
+  /**
+   * Creates the Shadow DOM root and attaches component styles
+   * via CSSStyleSheet (adoptedStyleSheets) for optimal performance.
+   *
+   * @returns {ShadowRoot} The component's shadow root.
+   */
   createRenderRoot() {
     const root = super.createRenderRoot();
     const ctor = this.constructor;
@@ -39,6 +59,13 @@ export class Okalit extends LitElement {
 
   // --- Lifecycle and Reactivity ---
 
+  /**
+   * Initializes reactive signal-backed properties from `static props`.
+   * Creates a signal for each prop and defines a getter/setter pair
+   * on the instance that bridges attribute changes with signal reactivity.
+   *
+   * @private
+   */
   _initProps() {
     const props = this.constructor.props;
     if (!props.length) return;
@@ -61,7 +88,13 @@ export class Okalit extends LitElement {
     }
   }
 
-  // This method is what enables your onChange() hook to work
+  /**
+   * Sets up a reactive effect that watches all declared props for changes.
+   * When any prop signal value changes, invokes the `onChange()` lifecycle hook
+   * with a map of changed props (previous and current values).
+   *
+   * @private
+   */
   _watchProps() {
     const props = this.constructor.props;
     if (!props.length) return;
@@ -101,6 +134,11 @@ export class Okalit extends LitElement {
     this._propsEffect = dispose;
   }
 
+  /**
+   * Called when the element is inserted into the DOM.
+   * Syncs attributes to props, re-initializes channels if needed,
+   * triggers `onInit()`, and starts watching prop changes.
+   */
   connectedCallback() {
     super.connectedCallback();
     this._syncAttributes();
@@ -115,6 +153,13 @@ export class Okalit extends LitElement {
     this._watchProps();
   }
 
+  /**
+   * Overrides LitElement's update cycle to wrap render() inside a reactive effect.
+   * This enables automatic re-renders when signals read during render change,
+   * without requiring explicit property declarations for each reactive dependency.
+   *
+   * @param {Map<string, any>} changedProperties — Map of changed Lit properties.
+   */
   update(changedProperties) {
     // Dispose previous signal tracking to prevent leaks
     if (this._reactiveEffect) {
@@ -138,6 +183,11 @@ export class Okalit extends LitElement {
     });
   }
 
+  /**
+   * Called when the element is removed from the DOM.
+   * Cleans up all reactive effects, prop watchers, and channel subscriptions
+   * to prevent memory leaks.
+   */
   disconnectedCallback() {
     super.disconnectedCallback();
     this.onDestroy();
@@ -160,30 +210,93 @@ export class Okalit extends LitElement {
     this._channelsInitialized = false;
   }
 
-  // Hook added for the initial DOM render
+  /**
+   * Called after the component's first render to the DOM.
+   * Delegates to the user-facing `onFirstRender()` hook.
+   *
+   * @param {Map<string, any>} changedProperties — Map of initially set properties.
+   */
   firstUpdated(changedProperties) {
     super.firstUpdated(changedProperties);
     this.onFirstRender(changedProperties);
   }
 
+  /**
+   * Called before each render cycle.
+   * Delegates to the user-facing `onBeforeRender()` hook.
+   *
+   * @param {Map<string, any>} changedProperties — Map of properties about to change.
+   */
   willUpdate(changedProperties) {
     super.willUpdate(changedProperties);
     this.onBeforeRender(changedProperties);
   }
 
+  /**
+   * Called after each render cycle completes.
+   * Delegates to the user-facing `onAfterRender()` hook.
+   *
+   * @param {Map<string, any>} changedProperties — Map of properties that changed.
+   */
   updated(changedProperties) {
     super.updated(changedProperties);
     this.onAfterRender(changedProperties);
   }
 
   // --- Lifecycle API (User Hooks) ---
+
+  /**
+   * Hook called once when the component is connected to the DOM.
+   * Override in subclasses for initialization logic.
+   */
   onInit() { }
+
+  /**
+   * Hook called when one or more reactive props change.
+   * Receives an object mapping prop names to { previous, current } values.
+   *
+   * @param {Record<string, { previous: any, current: any }>} changes — Changed props map.
+   */
   onChange(changes) { }
+
+  /**
+   * Hook called after the component's very first render.
+   * Useful for DOM queries that depend on rendered content.
+   *
+   * @param {Map<string, any>} changedProperties — Initially set properties.
+   */
   onFirstRender(changedProperties) { }
+
+  /**
+   * Hook called before each render cycle.
+   * Useful for computing derived state before the template executes.
+   *
+   * @param {Map<string, any>} changedProperties — Properties about to change.
+   */
   onBeforeRender(changedProperties) { }
+
+  /**
+   * Hook called after each render cycle completes.
+   * Useful for imperative DOM operations post-render.
+   *
+   * @param {Map<string, any>} changedProperties — Properties that changed.
+   */
   onAfterRender(changedProperties) { }
+
+  /**
+   * Hook called when the component is disconnected from the DOM.
+   * Override for cleanup logic (timers, subscriptions, etc.).
+   */
   onDestroy() { }
 
+  /**
+   * Handles attribute changes from the DOM and syncs them to the
+   * corresponding reactive signal using type coercion.
+   *
+   * @param {string} name — The kebab-case attribute name.
+   * @param {string|null} oldVal — Previous attribute value.
+   * @param {string|null} newVal — New attribute value.
+   */
   attributeChangedCallback(name, oldVal, newVal) {
     const propMap = this.constructor._propMap;
     if (!propMap) return;
@@ -198,6 +311,13 @@ export class Okalit extends LitElement {
   }
 
   // --- Utilities ---
+
+  /**
+   * Synchronizes all current HTML attributes to their corresponding
+   * reactive prop signals on component connection.
+   *
+   * @private
+   */
   _syncAttributes() {
     const propMap = this.constructor._propMap;
     if (!propMap) return;
@@ -210,6 +330,13 @@ export class Okalit extends LitElement {
     }
   }
 
+  /**
+   * Dispatches a custom event that bubbles through Shadow DOM boundaries.
+   * Used to communicate from child to parent components.
+   *
+   * @param {string} name — Event name (e.g. 'on:submit', 'on:change').
+   * @param {*} [detail] — Optional data payload attached to the event.
+   */
   output(name, detail) {
     this.dispatchEvent(new CustomEvent(name, {
       detail,
@@ -218,11 +345,24 @@ export class Okalit extends LitElement {
     }));
   }
 
+  /**
+   * Returns the component's template. Override in subclasses.
+   * Uses Lit's html tagged template for efficient DOM updates.
+   *
+   * @returns {TemplateResult} Lit HTML template.
+   */
   render() {
     return html``;
   }
 }
 
+/**
+ * Coerces a string attribute value to the appropriate JavaScript type.
+ *
+ * @param {string|null} value — The raw attribute string value.
+ * @param {Function} type — The target type constructor (Number, Boolean, or String).
+ * @returns {*} The coerced value.
+ */
 function coerceValue(value, type) {
   switch (type) {
     case Number: return Number(value);

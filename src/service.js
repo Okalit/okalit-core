@@ -1,8 +1,21 @@
 // ── RequestControl ─────────────────────────────────────────────
-// Wraps a Promise (typically from fetch) and exposes a declarative
-// fire() API for loading / success / error / finish callbacks,
-// while still being await-able via then().
 
+/**
+ * Wraps a Promise (typically from fetch) and exposes a declarative
+ * fire() API for loading / success / error / finish callbacks,
+ * while still being await-able via then().
+ *
+ * @example
+ * // Declarative usage:
+ * service.getUsers().fire({
+ *   onLoading: (loading) => this.loading = loading,
+ *   onSuccess: (data) => this.users = data,
+ *   onError: (err) => console.error(err),
+ * });
+ *
+ * // Await usage:
+ * const users = await service.getUsers();
+ */
 export class RequestControl {
   #promise;
 
@@ -50,9 +63,18 @@ export class RequestControl {
 }
 
 // ── StreamControl ──────────────────────────────────────────────
-// Wraps a Promise<stream> and exposes a declarative listen() API
-// for server-streaming gRPC calls.
 
+/**
+ * Wraps a Promise<stream> and exposes a declarative listen() API
+ * for server-streaming gRPC calls. Supports cancellation.
+ *
+ * @example
+ * service.streamUpdates(request).listen({
+ *   onData: (msg) => this.messages.push(msg),
+ *   onError: (err) => console.error(err),
+ *   onEnd: () => console.log('Stream ended'),
+ * });
+ */
 export class StreamControl {
   #streamPromise;
   #cancelled = false;
@@ -95,7 +117,18 @@ export class StreamControl {
 
 // ── Custom error classes ───────────────────────────────────────
 
+/**
+ * Error thrown when an HTTP request returns a non-OK status.
+ * Contains the status code, status text, and parsed response body.
+ *
+ * @extends Error
+ */
 export class HttpError extends Error {
+  /**
+   * @param {number} status — HTTP status code (e.g. 404, 500).
+   * @param {string} statusText — HTTP status text (e.g. 'Not Found').
+   * @param {*} body — Parsed response body (usually an object with message).
+   */
   constructor(status, statusText, body) {
     super(`HTTP ${status}: ${statusText}`);
     this.name = 'HttpError';
@@ -105,7 +138,17 @@ export class HttpError extends Error {
   }
 }
 
+/**
+ * Error thrown when a GraphQL response contains errors.
+ * Contains the array of GraphQL errors and any partial data.
+ *
+ * @extends Error
+ */
 export class GraphqlError extends Error {
+  /**
+   * @param {Array<{ message: string }>} errors — Array of GraphQL error objects.
+   * @param {*} data — Partial data returned alongside errors (may be null).
+   */
   constructor(errors, data) {
     super(errors.map(e => e.message).join('; '));
     this.name = 'GraphqlError';
@@ -114,7 +157,18 @@ export class GraphqlError extends Error {
   }
 }
 
+/**
+ * Error thrown when a gRPC call fails.
+ * Contains the gRPC status code, message, and trailing metadata.
+ *
+ * @extends Error
+ */
 export class GrpcError extends Error {
+  /**
+   * @param {number} code — gRPC status code (see GrpcStatus constants).
+   * @param {string} message — Error message from the server.
+   * @param {*} metadata — Trailing metadata from the gRPC response.
+   */
   constructor(code, message, metadata) {
     super(`gRPC ${code}: ${message}`);
     this.name = 'GrpcError';
@@ -185,8 +239,13 @@ export function inject(name) {
 }
 
 // ── RateLimiter (Token Bucket) ─────────────────────────────────
-
-class RateLimiter {
+/**
+ * Token bucket rate limiter for controlling request frequency.
+ * Tokens refill over time; each request consumes one token.
+ * If no tokens are available, the request waits until one is refilled.
+ *
+ * @private
+ */class RateLimiter {
   #tokens;
   #maxTokens;
   #refillRate;
@@ -204,6 +263,11 @@ class RateLimiter {
     this.#lastRefill = Date.now();
   }
 
+  /**
+   * Refills tokens based on elapsed time since last refill.
+   *
+   * @private
+   */
   #refill() {
     const now = Date.now();
     const elapsed = (now - this.#lastRefill) / 1000;
@@ -211,6 +275,12 @@ class RateLimiter {
     this.#lastRefill = now;
   }
 
+  /**
+   * Acquires a token, waiting if none are available.
+   * Returns a promise that resolves when the token is consumed.
+   *
+   * @returns {Promise<void>}
+   */
   async acquire() {
     this.#refill();
 
@@ -228,6 +298,13 @@ class RateLimiter {
 
 // ── Shared fetch infrastructure ────────────────────────────────
 
+/**
+ * Abstract base class providing shared HTTP infrastructure:
+ * headers, caching, timeouts, interceptors, rate limiting, and retry logic.
+ * Extended by OkalitService and OkalitGraphqlService.
+ *
+ * @private
+ */
 class BaseService {
   _headers = { 'Content-Type': 'application/json' };
   _cache = new Map();
@@ -239,6 +316,12 @@ class BaseService {
   _rateLimiter = null;
   _retryConfig = { attempts: 1, backoff: 1000, factor: 2 };
 
+  /**
+   * Applies shared configuration options (headers, cache, timeout, etc.).
+   *
+   * @protected
+   * @param {Object} opts — Configuration options.
+   */
   _configureMixin({ headers, cache, cacheTTL, timeout, interceptors, responseInterceptors, rateLimit, retry } = {}) {
     if (headers !== undefined) this._headers = { ...this._headers, ...headers };
     if (cache !== undefined) this._cacheEnabled = cache;
@@ -250,6 +333,16 @@ class BaseService {
     if (retry) this._retryConfig = { ...this._retryConfig, ...retry };
   }
 
+  /**
+   * Runs request interceptors sequentially. Each interceptor can modify
+   * the URL/options or cancel the request by returning falsy.
+   *
+   * @protected
+   * @param {string} url — The request URL.
+   * @param {Object} options — Fetch options.
+   * @returns {Promise<{ url: string, options: Object }>} Modified request config.
+   * @throws {HttpError} If an interceptor cancels the request.
+   */
   async _runInterceptors(url, options) {
     let currentUrl = url;
     let currentOptions = { ...options, headers: { ...this._headers, ...options.headers } };
@@ -268,6 +361,16 @@ class BaseService {
     return { url: currentUrl, options: currentOptions };
   }
 
+  /**
+   * Runs response interceptors sequentially. Each can transform data
+   * or error before returning to the caller.
+   *
+   * @protected
+   * @param {*} data — Response data (null if error).
+   * @param {Error|null} error — Error from the request (null if success).
+   * @returns {Promise<*>} Transformed response data.
+   * @throws {Error} If error is not cleared by any interceptor.
+   */
   async _runResponseInterceptors(data, error) {
     let currentData = data;
     let currentError = error;
@@ -282,6 +385,14 @@ class BaseService {
     return structuredClone(currentData);
   }
 
+  /**
+   * Retrieves a cached response if available and not expired.
+   *
+   * @protected
+   * @param {string} key — Cache key (typically the request URL).
+   * @param {boolean} [cacheable=true] — Whether this request is cacheable.
+   * @returns {{ status: string, data?: any, promise?: Promise }|null} Cached entry or null.
+   */
   _getCached(key, cacheable = true) {
     if (!cacheable || !this._cacheEnabled) return null;
     const cached = this._cache.get(key);
@@ -290,6 +401,14 @@ class BaseService {
     return cached;
   }
 
+  /**
+   * Stores a pending promise in the cache.
+   * Resolves to the final data or removes itself on error.
+   *
+   * @protected
+   * @param {string} key — Cache key.
+   * @param {Promise} promise — The in-flight request promise.
+   */
   _setCache(key, promise) {
     if (!this._cacheEnabled) return;
     this._cache.set(key, { status: 'pending', promise, time: Date.now() });
@@ -298,6 +417,12 @@ class BaseService {
       .catch(() => this._cache.delete(key));
   }
 
+  /**
+   * Clears cached entries. If no key is provided, clears all.
+   * If a key is provided, clears all entries whose key contains the string.
+   *
+   * @param {string} [key] — Partial key to match for selective clearing.
+   */
   clearCache(key) {
     if (!key) {
       this._cache.clear();
@@ -309,8 +434,24 @@ class BaseService {
   }
 }
 
-// ── OkalitService (REST) ───────────────────────────────────────
+// ── OkalitService (REST) ─────────────────────────────────────────
 
+/**
+ * REST HTTP service with built-in caching, rate limiting, retries,
+ * and request/response interceptors. Extend this class for each API domain.
+ *
+ * @extends BaseService
+ *
+ * @example
+ * @service('user')
+ * class UserService extends OkalitService {
+ *   constructor() {
+ *     super();
+ *     this.configure({ baseUrl: '/api/v1' });
+ *   }
+ *   getUsers() { return this.get('/users'); }
+ * }
+ */
 export class OkalitService extends BaseService {
   #baseUrl = '';
 
@@ -335,6 +476,13 @@ export class OkalitService extends BaseService {
 
   // ── HTTP helpers ───────────────────────────────────────────
 
+  /**
+   * Performs a GET request. Results are cacheable by default.
+   *
+   * @param {string} path — API path (appended to baseUrl).
+   * @param {Record<string, string>} [params] — Query parameters as key-value pairs.
+   * @returns {RequestControl} A controllable request wrapper.
+   */
   get(path, params) {
     let url = `${this.#baseUrl}${path}`;
     if (params) {
@@ -344,6 +492,13 @@ export class OkalitService extends BaseService {
     return new RequestControl(this.#request(url, { method: 'GET' }, true));
   }
 
+  /**
+   * Performs a POST request with a JSON body.
+   *
+   * @param {string} path — API path (appended to baseUrl).
+   * @param {*} body — Request payload (will be JSON-serialized).
+   * @returns {RequestControl} A controllable request wrapper.
+   */
   post(path, body) {
     return new RequestControl(this.#request(`${this.#baseUrl}${path}`, {
       method: 'POST',
@@ -351,6 +506,13 @@ export class OkalitService extends BaseService {
     }));
   }
 
+  /**
+   * Performs a PUT request with a JSON body.
+   *
+   * @param {string} path — API path (appended to baseUrl).
+   * @param {*} body — Request payload (will be JSON-serialized).
+   * @returns {RequestControl} A controllable request wrapper.
+   */
   put(path, body) {
     return new RequestControl(this.#request(`${this.#baseUrl}${path}`, {
       method: 'PUT',
@@ -358,6 +520,13 @@ export class OkalitService extends BaseService {
     }));
   }
 
+  /**
+   * Performs a PATCH request with a JSON body.
+   *
+   * @param {string} path — API path (appended to baseUrl).
+   * @param {*} body — Request payload (will be JSON-serialized).
+   * @returns {RequestControl} A controllable request wrapper.
+   */
   patch(path, body) {
     return new RequestControl(this.#request(`${this.#baseUrl}${path}`, {
       method: 'PATCH',
@@ -365,13 +534,24 @@ export class OkalitService extends BaseService {
     }));
   }
 
+  /**
+   * Performs a DELETE request.
+   *
+   * @param {string} path — API path (appended to baseUrl).
+   * @returns {RequestControl} A controllable request wrapper.
+   */
   delete(path) {
     return new RequestControl(this.#request(`${this.#baseUrl}${path}`, {
       method: 'DELETE',
     }));
   }
 
-  /** Clear the in-memory cache (all entries or a specific path). */
+  /**
+   * Clears the in-memory cache for this service.
+   * If a path is provided, only clears entries matching that path prefix.
+   *
+   * @param {string} [path] — API path to match for selective cache clearing.
+   */
   clearCache(path) {
     if (!path) {
       this._cache.clear();
@@ -385,6 +565,16 @@ export class OkalitService extends BaseService {
 
   // ── Internal ───────────────────────────────────────────────
 
+  /**
+   * Core request pipeline: rate-limits, runs interceptors, checks cache,
+   * executes fetch with retry logic, and runs response interceptors.
+   *
+   * @private
+   * @param {string} url — Full request URL.
+   * @param {Object} options — Fetch options (method, body, headers).
+   * @param {boolean} [cacheable=false] — Whether this response should be cached.
+   * @returns {Promise<*>} Parsed response data.
+   */
   async #request(url, options, cacheable = false) {
     // Rate-limit: wait for an available token before proceeding
     if (this._rateLimiter) await this._rateLimiter.acquire();
@@ -417,6 +607,15 @@ export class OkalitService extends BaseService {
     }
   }
 
+  /**
+   * Executes the actual fetch call with timeout support via AbortController.
+   * Parses the JSON response or throws an HttpError on non-OK status.
+   *
+   * @private
+   * @param {Object} intercepted — Intercepted request config { url, options }.
+   * @param {boolean} cacheable — Whether to store the result in cache.
+   * @returns {Promise<*>} Parsed JSON response data.
+   */
   async #executeFetch(intercepted, cacheable) {
     let controller;
     let timeoutId;
@@ -453,6 +652,19 @@ export class OkalitService extends BaseService {
 
 // ── OkalitSocketService (WebSocket) ────────────────────────────
 
+/**
+ * WebSocket service with auto-reconnect, exponential backoff, keepalive pings,
+ * outgoing message interceptors, and a pub/sub event system.
+ *
+ * @example
+ * @service('chat')
+ * class ChatSocket extends OkalitSocketService {
+ *   constructor() {
+ *     super();
+ *     this.configure({ url: 'wss://api.example.com/ws', reconnect: true });
+ *   }
+ * }
+ */
 export class OkalitSocketService {
   #url = '';
   #socket = null;
@@ -713,6 +925,19 @@ export class OkalitSocketService {
 
 // ── OkalitGrpcService (gRPC-Web) ───────────────────────────────
 
+/**
+ * gRPC-Web service providing unary and server-streaming RPC calls
+ * with metadata interceptors, response interceptors, and client caching.
+ *
+ * @example
+ * @service('grpc-users')
+ * class UsersGrpc extends OkalitGrpcService {
+ *   constructor() {
+ *     super();
+ *     this.configure({ host: 'https://api.example.com' });
+ *   }
+ * }
+ */
 export class OkalitGrpcService {
   #host = '';
   #metadata = {};
@@ -849,6 +1074,22 @@ export class OkalitGrpcService {
 
 // ── OkalitGraphqlService ───────────────────────────────────────
 
+/**
+ * GraphQL service with query/mutation support, caching, interceptors,
+ * and typed error handling via GraphqlError.
+ *
+ * @extends BaseService
+ *
+ * @example
+ * @service('gql')
+ * class ApiGraphql extends OkalitGraphqlService {
+ *   constructor() {
+ *     super();
+ *     this.configure({ endpoint: '/graphql' });
+ *   }
+ *   getUser(id) { return this.query(GET_USER, { id }); }
+ * }
+ */
 export class OkalitGraphqlService extends BaseService {
   #endpoint = '';
 
@@ -866,14 +1107,37 @@ export class OkalitGraphqlService extends BaseService {
     this._configureMixin(rest);
   }
 
+  /**
+   * Executes a GraphQL query. Results are cached if caching is enabled.
+   *
+   * @param {string} queryString — The GraphQL query string.
+   * @param {Record<string, *>} [variables={}] — Query variables.
+   * @returns {RequestControl} A controllable request wrapper.
+   */
   query(queryString, variables = {}) {
     return new RequestControl(this.#execute(queryString, variables));
   }
 
+  /**
+   * Executes a GraphQL mutation.
+   *
+   * @param {string} mutationString — The GraphQL mutation string.
+   * @param {Record<string, *>} [variables={}] — Mutation variables.
+   * @returns {RequestControl} A controllable request wrapper.
+   */
   mutate(mutationString, variables = {}) {
     return new RequestControl(this.#execute(mutationString, variables));
   }
 
+  /**
+   * Internal execution pipeline for GraphQL operations.
+   * Runs interceptors, checks cache, executes fetch, and handles GraphQL errors.
+   *
+   * @private
+   * @param {string} queryString — The GraphQL query/mutation string.
+   * @param {Record<string, *>} variables — Operation variables.
+   * @returns {Promise<*>} The `data` field from the GraphQL response.
+   */
   async #execute(queryString, variables) {
     const intercepted = await this._runInterceptors(this.#endpoint, {
       method: 'POST',
