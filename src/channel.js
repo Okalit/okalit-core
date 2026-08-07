@@ -341,6 +341,59 @@ function getStorage(persist) {
 }
 
 /**
+ * Subscribe imperatively to an existing channel by name.
+ * Returns a handle { value, set, reset } and a dispose function.
+ *
+ * @param {string} name — Channel identifier.
+ * @param {Function} [callback] — Optional callback invoked on value changes.
+ * @param {string} [senderTag] — Tag name for debug logging.
+ * @returns {{ handle: { value: any, set: Function, reset: Function }, dispose: Function }}
+ */
+export function subscribeChannel(name, callback, senderTag = 'unknown') {
+  const channel = registry.get(name);
+  if (!channel) {
+    console.warn(`[okalit-channel] Channel "${name}" not found. Make sure it is defined before subscribing.`);
+    return { handle: null, dispose: () => {} };
+  }
+
+  const handle = {
+    set: (value) => {
+      if (_debugMode) _logChannelSet(name, senderTag, value, channel);
+      channel.set(value);
+    },
+    reset: () => channel.reset?.(),
+    get value() { return channel.value; },
+  };
+
+  const disposers = [];
+
+  if (callback) {
+    const wrappedCallback = (value) => {
+      if (_debugMode) _logChannelReceive(name, senderTag, callback.name || 'anonymous', value);
+      callback(value);
+    };
+
+    if (!channel._subscriberMeta) channel._subscriberMeta = new Map();
+    channel._subscriberMeta.set(wrappedCallback, senderTag);
+    channel.subscribers.add(wrappedCallback);
+    disposers.push(() => {
+      channel.subscribers.delete(wrappedCallback);
+      channel._subscriberMeta?.delete(wrappedCallback);
+    });
+
+    if (!channel.ephemeral) {
+      const dispose = effect(() => {
+        const current = channel.signal.value;
+        untracked(() => wrappedCallback(current));
+      });
+      disposers.push(dispose);
+    }
+  }
+
+  return { handle, dispose: () => disposers.forEach(fn => fn()) };
+}
+
+/**
  * Initialize channels declared in static channels.
  * Called from the Okalit base class constructor.
  *

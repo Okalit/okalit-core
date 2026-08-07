@@ -1,7 +1,7 @@
 import { html} from 'lit';
 import { Router, navigate } from './router.js';
 import { createI18n } from './i18n.js';
-import { setDebugMode, setObfuscateMode } from './channel.js';
+import { setDebugMode, setObfuscateMode, subscribeChannel } from './channel.js';
 import { escapeHtml } from './utils.js';
 import './router-outlet.js';
 
@@ -193,3 +193,76 @@ export const PageMixin = (Base) => class extends Base {
 };
 
 export { navigate };
+
+/**
+ * SubscribeChannelsMixin — Mixin for components that need to imperatively
+ * subscribe to shared/app-level channels without declaring them in `static channels`.
+ *
+ * Ideal for catalog components that react to channels owned by the application.
+ *
+ * @param {typeof Okalit} Base — The base class to extend.
+ * @returns {typeof Okalit} Extended class with channel subscription helpers.
+ *
+ * @example
+ * class MyAtom extends SubscribeChannelsMixin(Okalit) {
+ *   onSubscribeChannels() {
+ *     this.subscribe('ui:theme', (value) => {
+ *       this.theme = value;
+ *     });
+ *
+ *     this.subscribe('ui:locale', (value) => {
+ *       this.locale = value;
+ *     });
+ *   }
+ * }
+ */
+export const SubscribeChannelsMixin = (Base) => class extends Base {
+  constructor() {
+    super();
+    this._channelSubscriptions = [];
+  }
+
+  /**
+   * Subscribe to a channel by name. Returns the channel handle.
+   * Subscriptions are automatically cleaned up on disconnect.
+   *
+   * @param {string} channelName — The channel identifier (e.g. 'ui:theme').
+   * @param {Function} [callback] — Optional callback invoked when the channel value changes.
+   * @returns {{ value: any, set: Function, reset: Function }|null} The channel handle or null if not found.
+   */
+  subscribe(channelName, callback) {
+    const senderTag = this.tagName?.toLowerCase() || 'unknown';
+    const { handle, dispose } = subscribeChannel(channelName, callback, senderTag);
+    if (dispose) this._channelSubscriptions.push(dispose);
+    return handle;
+  }
+
+  /**
+   * Emit a value to a channel without storing a handle.
+   *
+   * @param {string} channelName — The channel identifier.
+   * @param {*} value — The value to set.
+   */
+  channelEmit(channelName, value) {
+    const senderTag = this.tagName?.toLowerCase() || 'unknown';
+    const { handle } = subscribeChannel(channelName, null, senderTag);
+    if (handle) handle.set(value);
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    this.onSubscribeChannels();
+  }
+
+  disconnectedCallback() {
+    for (const dispose of this._channelSubscriptions) dispose();
+    this._channelSubscriptions = [];
+    super.disconnectedCallback();
+  }
+
+  /**
+   * Override this hook to subscribe to channels imperatively.
+   * Called once when the component is connected to the DOM.
+   */
+  onSubscribeChannels() {}
+};
