@@ -340,8 +340,8 @@ export class Okalit extends LitElement {
   output(name, detail) {
     this.dispatchEvent(new CustomEvent(name, {
       detail,
-      bubbles: true,
-      composed: true,
+      bubbles: false,
+      composed: false,
     }));
   }
 
