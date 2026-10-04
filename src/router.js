@@ -30,6 +30,7 @@ export class Router {
 
     this._routes = routes;
     this._outlets = new Set();
+    this._navigationId = 0;
 
     // Reactive signals for current route state
     this.currentPath = signal(window.location.pathname);
@@ -71,12 +72,7 @@ export class Router {
       return;
     }
 
-    if (replace) {
-      window.history.replaceState(null, '', path);
-    } else {
-      window.history.pushState(null, '', path);
-    }
-    this._resolve(path);
+    return this._resolve(path, { historyMode: replace ? 'replace' : 'push' });
   }
 
   /**
@@ -118,6 +114,7 @@ export class Router {
    * clearing the global instance reference.
    */
   destroy() {
+    this._navigationId++;
     window.removeEventListener('popstate', this._onPopState);
     instance = null;
   }
@@ -140,8 +137,11 @@ export class Router {
    *
    * @private
    * @param {string} fullPath — Full path including query string.
+   * @param {Object} [options] — Resolution options.
+   * @param {'push'|'replace'|null} [options.historyMode=null] — History update after guards pass.
    */
-  async _resolve(fullPath) {
+  async _resolve(fullPath, { historyMode = null } = {}) {
+    const navigationId = ++this._navigationId;
     const [pathname, search] = fullPath.split('?');
     const path = pathname || '/';
     const query = Object.fromEntries(new URLSearchParams(search || ''));
@@ -153,8 +153,14 @@ export class Router {
     }
 
     // Run guards BEFORE loading anything
-    const guardsPassed = await this._runGuards(match.guards, path, match);
-    if (!guardsPassed) return;
+    const guardsPassed = await this._runGuards(match.guards, path, match, navigationId);
+    if (!guardsPassed || navigationId !== this._navigationId) return false;
+
+    if (historyMode === 'replace') {
+      window.history.replaceState(null, '', fullPath);
+    } else if (historyMode === 'push') {
+      window.history.pushState(null, '', fullPath);
+    }
 
     // Update reactive state
     this.currentPath.value = path;
@@ -179,6 +185,8 @@ export class Router {
     for (const outlet of this._outlets) {
       outlet._renderRoute(match);
     }
+
+    return true;
   }
 
   /**
@@ -189,13 +197,15 @@ export class Router {
    * @param {Function[]} guards — Array of guard functions to execute.
    * @param {string} path — The target path being navigated to.
    * @param {Object} match — The matched route object.
-   * @returns {Promise<boolean>} True if all guards pass, false otherwise.
+   * @param {number} navigationId — Resolution identifier used to discard stale guards.
+   * @returns {Promise<boolean>} True if all guards pass and navigation is current, false otherwise.
    */
-  async _runGuards(guards, path, match) {
+  async _runGuards(guards, path, match, navigationId) {
     if (!guards || !guards.length) return true;
 
     for (const guard of guards) {
       const result = await guard({ path, params: match.params, route: match });
+      if (navigationId !== this._navigationId) return false;
       if (result === false) return false;
       if (typeof result === 'string') {
         // Guard returned a redirect path

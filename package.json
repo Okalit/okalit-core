@@ -12,6 +12,8 @@
   ],
   "exports": {
     ".": "./dist/index.js",
+    "./form": "./dist/form.js",
+    "./form.js": "./dist/form.js",
     "./performance": "./dist/performance.js",
     "./performance.js": "./dist/performance.js"
   },

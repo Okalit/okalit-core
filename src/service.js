@@ -418,6 +418,91 @@ class BaseService {
   }
 
   /**
+   * Executes an HTTP request through the shared transport pipeline.
+   *
+   * @protected
+   * @param {string} url — Request URL.
+   * @param {Object} options — Fetch options.
+   * @param {Object} [config] — Transport options.
+   * @param {boolean} [config.cacheable=false] — Whether the response may be cached.
+   * @param {string|Function} [config.cacheKey] — Cache key or factory receiving intercepted request data.
+   * @param {(response: Response) => Promise<*>} [config.parseResponse] — Successful response parser.
+   * @returns {Promise<*>} Parsed and intercepted response data.
+   */
+  async _request(url, options, { cacheable = false, cacheKey, parseResponse = parseJsonResponse } = {}) {
+    if (this._rateLimiter) await this._rateLimiter.acquire();
+
+    const intercepted = await this._runInterceptors(url, options);
+    const resolvedCacheKey = typeof cacheKey === 'function'
+      ? cacheKey(intercepted)
+      : cacheKey ?? intercepted.url;
+    const cached = this._getCached(resolvedCacheKey, cacheable);
+
+    if (cached) {
+      const data = cached.status === 'pending' ? await cached.promise : cached.data;
+      return this._runResponseInterceptors(data, null);
+    }
+
+    const { attempts, backoff, factor } = this._retryConfig;
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        const promise = this._executeFetch(intercepted, parseResponse);
+        if (cacheable) this._setCache(resolvedCacheKey, promise);
+        const data = await promise;
+        return this._runResponseInterceptors(data, null);
+      } catch (err) {
+        const isRetryable = err instanceof HttpError && (err.status === 0 || err.status >= 500);
+        const isLast = attempt === attempts - 1;
+
+        if (!isRetryable || isLast) {
+          return this._runResponseInterceptors(null, err);
+        }
+
+        const delay = backoff * Math.pow(factor, attempt);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  /**
+   * Executes one fetch attempt with timeout and HTTP error handling.
+   *
+   * @protected
+   * @param {{ url: string, options: Object }} intercepted — Intercepted request data.
+   * @param {(response: Response) => Promise<*>} parseResponse — Successful response parser.
+   * @returns {Promise<*>} Parsed response data.
+   */
+  async _executeFetch(intercepted, parseResponse) {
+    let controller;
+    let timeoutId;
+    const fetchOptions = { ...intercepted.options };
+
+    if (this._timeout > 0) {
+      controller = new AbortController();
+      fetchOptions.signal = controller.signal;
+      timeoutId = setTimeout(() => controller.abort(), this._timeout);
+    }
+
+    try {
+      const response = await fetch(intercepted.url, fetchOptions);
+      if (!response.ok) {
+        let body;
+        try { body = await response.json(); } catch { body = { message: response.statusText }; }
+        throw new HttpError(response.status, response.statusText, body);
+      }
+      return await parseResponse(response);
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        throw new HttpError(0, 'Request Timeout', { message: `Request exceeded ${this._timeout}ms` });
+      }
+      throw err;
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+  }
+
+  /**
    * Clears cached entries. If no key is provided, clears all.
    * If a key is provided, clears all entries whose key contains the string.
    *
@@ -489,7 +574,7 @@ export class OkalitService extends BaseService {
       const qs = new URLSearchParams(params).toString();
       if (qs) url += `?${qs}`;
     }
-    return new RequestControl(this.#request(url, { method: 'GET' }, true));
+    return new RequestControl(this._request(url, { method: 'GET' }, { cacheable: true }));
   }
 
   /**
@@ -500,7 +585,7 @@ export class OkalitService extends BaseService {
    * @returns {RequestControl} A controllable request wrapper.
    */
   post(path, body) {
-    return new RequestControl(this.#request(`${this.#baseUrl}${path}`, {
+    return new RequestControl(this._request(`${this.#baseUrl}${path}`, {
       method: 'POST',
       body: JSON.stringify(body),
     }));
@@ -514,7 +599,7 @@ export class OkalitService extends BaseService {
    * @returns {RequestControl} A controllable request wrapper.
    */
   put(path, body) {
-    return new RequestControl(this.#request(`${this.#baseUrl}${path}`, {
+    return new RequestControl(this._request(`${this.#baseUrl}${path}`, {
       method: 'PUT',
       body: JSON.stringify(body),
     }));
@@ -528,7 +613,7 @@ export class OkalitService extends BaseService {
    * @returns {RequestControl} A controllable request wrapper.
    */
   patch(path, body) {
-    return new RequestControl(this.#request(`${this.#baseUrl}${path}`, {
+    return new RequestControl(this._request(`${this.#baseUrl}${path}`, {
       method: 'PATCH',
       body: JSON.stringify(body),
     }));
@@ -541,7 +626,7 @@ export class OkalitService extends BaseService {
    * @returns {RequestControl} A controllable request wrapper.
    */
   delete(path) {
-    return new RequestControl(this.#request(`${this.#baseUrl}${path}`, {
+    return new RequestControl(this._request(`${this.#baseUrl}${path}`, {
       method: 'DELETE',
     }));
   }
@@ -563,91 +648,6 @@ export class OkalitService extends BaseService {
     }
   }
 
-  // ── Internal ───────────────────────────────────────────────
-
-  /**
-   * Core request pipeline: rate-limits, runs interceptors, checks cache,
-   * executes fetch with retry logic, and runs response interceptors.
-   *
-   * @private
-   * @param {string} url — Full request URL.
-   * @param {Object} options — Fetch options (method, body, headers).
-   * @param {boolean} [cacheable=false] — Whether this response should be cached.
-   * @returns {Promise<*>} Parsed response data.
-   */
-  async #request(url, options, cacheable = false) {
-    // Rate-limit: wait for an available token before proceeding
-    if (this._rateLimiter) await this._rateLimiter.acquire();
-
-    const intercepted = await this._runInterceptors(url, options);
-
-    const cached = this._getCached(intercepted.url, cacheable);
-    if (cached) {
-      const data = cached.status === 'pending' ? await cached.promise : cached.data;
-      return this._runResponseInterceptors(data, null);
-    }
-
-    const { attempts, backoff, factor } = this._retryConfig;
-
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      try {
-        const data = await this.#executeFetch(intercepted, cacheable);
-        return this._runResponseInterceptors(data, null);
-      } catch (err) {
-        const isRetryable = (err instanceof HttpError && err.status >= 500) || err.name === 'AbortError';
-        const isLast = attempt === attempts - 1;
-
-        if (!isRetryable || isLast) {
-          return this._runResponseInterceptors(null, err);
-        }
-
-        const delay = backoff * Math.pow(factor, attempt);
-        await new Promise(r => setTimeout(r, delay));
-      }
-    }
-  }
-
-  /**
-   * Executes the actual fetch call with timeout support via AbortController.
-   * Parses the JSON response or throws an HttpError on non-OK status.
-   *
-   * @private
-   * @param {Object} intercepted — Intercepted request config { url, options }.
-   * @param {boolean} cacheable — Whether to store the result in cache.
-   * @returns {Promise<*>} Parsed JSON response data.
-   */
-  async #executeFetch(intercepted, cacheable) {
-    let controller;
-    let timeoutId;
-    const fetchOptions = { ...intercepted.options };
-
-    if (this._timeout > 0) {
-      controller = new AbortController();
-      fetchOptions.signal = controller.signal;
-      timeoutId = setTimeout(() => controller.abort(), this._timeout);
-    }
-
-    const promise = fetch(intercepted.url, fetchOptions).then(async (res) => {
-      if (!res.ok) {
-        let body;
-        try { body = await res.json(); } catch { body = { message: res.statusText }; }
-        throw new HttpError(res.status, res.statusText, body);
-      }
-      const text = await res.text();
-      return text ? JSON.parse(text) : null;
-    }).catch((err) => {
-      if (err.name === 'AbortError') {
-        throw new HttpError(0, 'Request Timeout', { message: `Request exceeded ${this._timeout}ms` });
-      }
-      throw err;
-    }).finally(() => {
-      if (timeoutId) clearTimeout(timeoutId);
-    });
-
-    if (cacheable) this._setCache(intercepted.url, promise);
-
-    return promise;
-  }
 }
 
 // ── OkalitSocketService (WebSocket) ────────────────────────────
@@ -1099,8 +1099,11 @@ export class OkalitGraphqlService extends BaseService {
    * @param {Record<string, string>} [opts.headers]
    * @param {boolean} [opts.cache]    — cache query results (default: false)
    * @param {number}  [opts.cacheTTL] — cache lifetime in ms
+  * @param {number}  [opts.timeout]  — request timeout in ms (0 = no timeout)
    * @param {Object[]} [opts.interceptors] — request interceptors
    * @param {Object[]} [opts.responseInterceptors] — response interceptors
+  * @param {{ maxRequests?: number, perSeconds?: number }} [opts.rateLimit] — token bucket rate limiter
+  * @param {{ attempts?: number, backoff?: number, factor?: number }} [opts.retry] — retry configuration
    */
   configure({ endpoint, ...rest } = {}) {
     if (endpoint !== undefined) this.#endpoint = endpoint.replace(/\/+$/, '');
@@ -1115,7 +1118,7 @@ export class OkalitGraphqlService extends BaseService {
    * @returns {RequestControl} A controllable request wrapper.
    */
   query(queryString, variables = {}) {
-    return new RequestControl(this.#execute(queryString, variables));
+    return new RequestControl(this.#execute(queryString, variables, true));
   }
 
   /**
@@ -1126,7 +1129,7 @@ export class OkalitGraphqlService extends BaseService {
    * @returns {RequestControl} A controllable request wrapper.
    */
   mutate(mutationString, variables = {}) {
-    return new RequestControl(this.#execute(mutationString, variables));
+    return new RequestControl(this.#execute(mutationString, variables, false));
   }
 
   /**
@@ -1136,42 +1139,28 @@ export class OkalitGraphqlService extends BaseService {
    * @private
    * @param {string} queryString — The GraphQL query/mutation string.
    * @param {Record<string, *>} variables — Operation variables.
+   * @param {boolean} cacheable — Whether the operation result may be cached.
    * @returns {Promise<*>} The `data` field from the GraphQL response.
    */
-  async #execute(queryString, variables) {
-    const intercepted = await this._runInterceptors(this.#endpoint, {
+  async #execute(queryString, variables, cacheable) {
+    return this._request(this.#endpoint, {
       method: 'POST',
       body: JSON.stringify({ query: queryString, variables }),
-    });
-
-    const fullCacheKey = intercepted.url + queryString + JSON.stringify(variables);
-    const cached = this._getCached(fullCacheKey);
-    let promise;
-
-    if (cached) {
-      promise = cached.status === 'pending' ? cached.promise : Promise.resolve(cached.data);
-    } else {
-      promise = fetch(intercepted.url, intercepted.options).then(async (res) => {
-        if (!res.ok) {
-          let errorBody;
-          try { errorBody = await res.json(); } catch { errorBody = { message: res.statusText }; }
-          throw new HttpError(res.status, res.statusText, errorBody);
-        }
-
-        const json = await res.json();
+    }, {
+      cacheable,
+      cacheKey: ({ url }) => url + queryString + JSON.stringify(variables),
+      parseResponse: async (response) => {
+        const json = await response.json();
         if (json.errors) {
           throw new GraphqlError(json.errors, json.data ?? null);
         }
         return json.data;
-      });
-
-      this._setCache(fullCacheKey, promise);
-    }
-
-    let data = null;
-    let error = null;
-    try { data = await promise; } catch (e) { error = e; }
-
-    return this._runResponseInterceptors(data, error);
+      },
+    });
   }
+}
+
+async function parseJsonResponse(response) {
+  const text = await response.text();
+  return text ? JSON.parse(text) : null;
 }
