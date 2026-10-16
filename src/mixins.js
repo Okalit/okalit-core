@@ -34,6 +34,7 @@ export const AppMixin = (Base) => class extends Base {
     routes: [],
     template: DEFAULT_LAYOUT,
     i18n: null,
+    routerCacheLimit: 10,
   };
 
   constructor() {
@@ -91,7 +92,8 @@ export const AppMixin = (Base) => class extends Base {
 
   render() {
     const layoutFn = this.constructor.config?.template || DEFAULT_LAYOUT;
-    return html`${layoutFn(html`<okalit-router></okalit-router>`)}`;
+    const cacheLimit = this.constructor.config?.routerCacheLimit ?? 10;
+    return html`${layoutFn(html`<okalit-router cache-limit=${cacheLimit}></okalit-router>`)}`;
   }
 };
 
@@ -129,8 +131,9 @@ export const ModuleMixin = (Base) => class extends Base {
   }
 
   render() {
+    const cacheLimit = this.constructor.routerCacheLimit ?? 10;
     return html`
-        <okalit-router></okalit-router>
+        <okalit-router cache-limit=${cacheLimit}></okalit-router>
     `;
   }
 };

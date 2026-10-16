@@ -1,5 +1,7 @@
 import { Router } from './router.js';
 
+const DEFAULT_CACHE_LIMIT = 10;
+
 /**
  * Custom element that acts as a rendering target for the Okalit router.
  * Automatically determines its nesting depth within the route tree and
@@ -12,6 +14,10 @@ import { Router } from './router.js';
  * @element okalit-router
  */
 export class OkalitRouter extends HTMLElement {
+  static get observedAttributes() {
+    return ['cache-limit'];
+  }
+
   /**
    * Initializes the router outlet with a shadow root and display:contents styling.
    */
@@ -25,8 +31,26 @@ export class OkalitRouter extends HTMLElement {
     this._currentElement = null;
     this._currentRoute = null;
     this._cache = new Map();
+    this._cacheLimit = DEFAULT_CACHE_LIMIT;
     this._depth = 0;
     this._renderVersion = 0;
+  }
+
+  get cacheLimit() {
+    return this._cacheLimit;
+  }
+
+  set cacheLimit(value) {
+    const limit = Number(value);
+    this._cacheLimit = Number.isFinite(limit) && limit >= 0
+      ? Math.floor(limit)
+      : DEFAULT_CACHE_LIMIT;
+    this._trimCache();
+  }
+
+  attributeChangedCallback(name, oldValue, newValue) {
+    if (name !== 'cache-limit' || oldValue === newValue) return;
+    this.cacheLimit = newValue === null ? DEFAULT_CACHE_LIMIT : newValue;
   }
 
   /**
@@ -88,6 +112,7 @@ export class OkalitRouter extends HTMLElement {
     // Restore from cache if available
     const cached = this._cache.get(route.component);
     if (cached) {
+      this._cache.delete(route.component);
       this._hideOrRemoveCurrent();
 
       cached.style.display = '';
@@ -126,14 +151,25 @@ export class OkalitRouter extends HTMLElement {
   _hideOrRemoveCurrent() {
     if (!this._currentElement) return;
 
-    if (this._currentRoute?.cache) {
+    if (this._currentRoute?.cache && this._cacheLimit > 0) {
       this._currentElement.style.display = 'none';
+      this._cache.delete(this._currentComponent);
       this._cache.set(this._currentComponent, this._currentElement);
       if (typeof this._currentElement.onCacheHide === 'function') {
         this._currentElement.onCacheHide();
       }
+      this._trimCache();
     } else {
       this._currentElement.remove();
+    }
+  }
+
+  _trimCache() {
+    while (this._cache.size > this._cacheLimit) {
+      const oldestComponent = this._cache.keys().next().value;
+      const oldestElement = this._cache.get(oldestComponent);
+      this._cache.delete(oldestComponent);
+      oldestElement?.remove();
     }
   }
 }
